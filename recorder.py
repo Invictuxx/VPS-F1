@@ -2,78 +2,35 @@ import os
 import re
 import sys
 import time
-import shlex
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlsplit
+
 import requests
 
-# ============================================================================
-# UTILIDADES DE CONFIGURACIÓN
-# ============================================================================
-
-def get_str_env(name, default="", required=False):
-    value = os.environ.get(name, default).strip()
-    if required and not value:
-        print(f"ERROR DE CONFIGURACIÓN: falta la variable {name}.", flush=True)
-        sys.exit(1)
-    return value
-
-def get_int_env(name, default):
-    raw = os.environ.get(name, str(default)).strip()
-    if not raw:
-        raw = str(default)
-    try:
-        return int(raw)
-    except ValueError:
-        print(
-            f"ERROR DE CONFIGURACIÓN: {name}='{raw}' no es un entero válido.",
-            flush=True,
-        )
-        sys.exit(1)
-
-
 
 # ============================================================
-# CONFIGURACIÓN
+# CONFIGURACIÓN (Desde GitHub Actions)
 # ============================================================
 
-STREAM_PAGE_URL = get_str_env("STREAM_PAGE_URL", required=True)
+# Ahora lee la página web desde los secrets de Actions
+STREAM_PAGE_URL = os.environ.get("STREAM_PAGE_URL", "")
 
-FILESTER_API_KEY = get_str_env("FILESTER_API_KEY", required=True)
-
-FILESTER_API_KEY = get_str_env("FILESTER_FOLDER_ID", required=False)
+# Credenciales de Filester
+FILESTER_API_KEY = os.environ.get("FILESTER_API_KEY", "TWQwwjc2Jp1lDyVkd4AViqE3h4Nxnfbx")
+FILESTER_FOLDER_ID = os.environ.get("FILESTER_FOLDER_ID", "e0bccad1b2ca55ff")
 
 # Duración de la grabación.
-# 3600 = 1 hora.
-RECORDING_DURATION = int(
-    os.environ.get(
-        "RECORDING_DURATION",
-        "30"
-    )
-)
+RECORDING_DURATION = int(os.environ.get("RECORDING_DURATION", "30"))
 
 # Número de intentos para subir a Filester.
-UPLOAD_RETRIES = int(
-    os.environ.get(
-        "UPLOAD_RETRIES",
-        "5"
-    )
-)
+UPLOAD_RETRIES = int(os.environ.get("UPLOAD_RETRIES", "5"))
 
 # Segundos entre intentos.
-RETRY_DELAY = int(
-    os.environ.get(
-        "RETRY_DELAY",
-        "30"
-    )
-)
+RETRY_DELAY = int(os.environ.get("RETRY_DELAY", "30"))
 
 # URL de la API de Filester.
-FILESTER_UPLOAD_URL = (
-    "https://u1.filester.me/api/v1/upload"
-)
+FILESTER_UPLOAD_URL = "https://u1.filester.me/api/v1/upload"
 
 
 # ============================================================
@@ -81,124 +38,115 @@ FILESTER_UPLOAD_URL = (
 # ============================================================
 
 def create_filenames():
-
     now = datetime.now()
+    timestamp = now.strftime("%Y-%m-%d_%H-%M-%S")
 
-    timestamp = now.strftime(
-        "%Y-%m-%d_%H-%M-%S"
-    )
-
-    original = (
-        f"grabacion_{timestamp}_720p.mp4"
-    )
-
-    final = (
-        f"grabacion_{timestamp}_1080p.mp4"
-    )
+    # IMPORTANTE: Grabamos en .ts para evitar corrupción y pixelación
+    original = f"grabacion_{timestamp}_720p.ts"
+    final = f"grabacion_{timestamp}_1080p.mp4"
 
     return original, final
+
+
+# ============================================================
+# OBTENER M3U8 DESDE LA PÁGINA
+# ============================================================
+
+def javascript_unescape(value):
+    value = value.replace("\\/", "/")
+    value = value.replace("\\u0026", "&")
+    value = value.replace("\\x26", "&")
+    value = value.replace("&", "&")
+    return value
+
+def get_m3u8_url():
+    print()
+    print("=" * 70)
+    print("0. OBTENIENDO ENLACE M3U8")
+    print("=" * 70)
+
+    if not STREAM_PAGE_URL:
+        print("ERROR: La variable STREAM_PAGE_URL no está configurada.")
+        sys.exit(1)
+
+    print(f"Página: {STREAM_PAGE_URL}")
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    }
+
+    response = requests.get(STREAM_PAGE_URL, headers=headers, timeout=30)
+    response.raise_for_status()
+    html = response.text
+
+    patterns = [
+        r'playbackURL\s*=\s*"([^"]+)"',
+        r"playbackURL\s*=\s*'([^']+)'",
+        r'"playbackURL"\s*:\s*"([^"]+)"',
+        r"'playbackURL'\s*:\s*'([^']+)'",
+        r'https?:\\?/\\?/[^"\']+?\.m3u8[^"\']*'
+    ]
+
+    m3u8_url = None
+    for pattern in patterns:
+        match = re.search(pattern, html, re.IGNORECASE)
+        if match:
+            # Si hay grupos, tomamos el 1, si no, el coincidencia completa (0)
+            m3u8_url = match.group(1) if len(match.groups()) > 0 else match.group(0)
+            break
+
+    if not m3u8_url:
+        print("ERROR: No se encontró playbackURL ni una URL .m3u8 en el HTML.")
+        sys.exit(1)
+
+    m3u8_url = javascript_unescape(m3u8_url).strip()
+
+    print(f"M3U8 Extraído: {m3u8_url}")
+    return m3u8_url
 
 
 # ============================================================
 # GRABAR STREAM HLS
 # ============================================================
 
-def record_stream(output_file):
-
+def record_stream(m3u8_url, output_file):
     print()
     print("=" * 70)
     print("1. INICIANDO GRABACIÓN HLS")
     print("=" * 70)
 
-    print(f"URL:")
-    print(STREAM_PAGE_URL)
-
-    print()
-    print(
-        f"Duración: "
-        f"{RECORDING_DURATION} segundos"
-    )
-
-    print(
-        f"Archivo: "
-        f"{output_file}"
-    )
+    print(f"Duración: {RECORDING_DURATION} segundos")
+    print(f"Archivo temporal: {output_file}")
 
     command = [
         "ffmpeg",
-
-        # Sobrescribir si existe
+        "-hide_banner",
         "-y",
-
-        # Reconexión HTTP
-        "-reconnect",
-        "1",
-
-        "-reconnect_streamed",
-        "1",
-
-        "-reconnect_delay_max",
-        "10",
-
-        # HLS
-        "-i",
-        STREAM_PAGE_URL,
-
-        # Una hora
-        "-t",
-        str(RECORDING_DURATION),
-
-        # Copiar sin recodificar
-        "-c:v",
-        "copy",
-
-        "-c:a",
-        "copy",
-
-        # Convertir AAC ADTS a formato MP4
-        "-bsf:a",
-        "aac_adtstoasc",
-
-        # Facilita reproducción/streaming posterior
-        "-movflags",
-        "+faststart",
-
-        output_file
+        "-fflags", "+genpts",      # Repara timestamps rotos para evitar píxeles corruptos
+        "-reconnect", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_delay_max", "10",
+        "-i", m3u8_url,
+        "-t", str(RECORDING_DURATION),
+        "-c:v", "copy",
+        "-c:a", "copy",
+        output_file                # Se guarda en .ts
     ]
 
-    print()
-    print("Ejecutando FFmpeg...")
-    print()
+    print("\nEjecutando FFmpeg...\n")
 
     try:
-
-        result = subprocess.run(
-            command,
-            check=False
-        )
-
+        result = subprocess.run(command, check=False)
     except FileNotFoundError:
-
-        print(
-            "ERROR: FFmpeg no está instalado."
-        )
-
+        print("ERROR: FFmpeg no está instalado.")
         return False
 
     if result.returncode != 0:
-
-        print(
-            "ERROR: FFmpeg terminó con "
-            f"código {result.returncode}"
-        )
-
+        print(f"ERROR: FFmpeg terminó con código {result.returncode}")
         return False
 
-    print()
-    print(
-        "Grabación terminada correctamente."
-    )
-
+    print("\nGrabación terminada correctamente.")
     return True
 
 
@@ -207,46 +155,23 @@ def record_stream(output_file):
 # ============================================================
 
 def validate_file(filename):
-
     path = Path(filename)
 
     if not path.exists():
-
-        print(
-            f"ERROR: no existe "
-            f"{filename}"
-        )
-
+        print(f"ERROR: no existe {filename}")
         return False
 
     size = path.stat().st_size
 
     if size <= 0:
-
-        print(
-            f"ERROR: {filename} "
-            "está vacío."
-        )
-
+        print(f"ERROR: {filename} está vacío.")
         return False
 
-    size_mb = size / (
-        1024 * 1024
-    )
+    size_mb = size / (1024 * 1024)
+    size_gb = size / (1024 * 1024 * 1024)
 
-    size_gb = size / (
-        1024 * 1024 * 1024
-    )
-
-    print()
-    print(
-        f"Archivo: {filename}"
-    )
-
-    print(
-        f"Tamaño: {size_mb:.2f} MB "
-        f"({size_gb:.2f} GB)"
-    )
+    print(f"\nArchivo: {filename}")
+    print(f"Tamaño: {size_mb:.2f} MB ({size_gb:.2f} GB)")
 
     return True
 
@@ -255,128 +180,50 @@ def validate_file(filename):
 # UPSCALE 720p → 1080p
 # ============================================================
 
-def upscale_to_1080p(
-    input_file,
-    output_file
-):
-
+def upscale_to_1080p(input_file, output_file):
     print()
     print("=" * 70)
     print("2. UPSCALE 720p → 1080p")
     print("=" * 70)
 
-    print(
-        f"Entrada: {input_file}"
-    )
-
-    print(
-        f"Salida: {output_file}"
-    )
-
-    print()
-    print(
-        "Escalador: Lanczos"
-    )
-
-    print(
-        "Codec: H.264"
-    )
-
-    print(
-        "CRF: 17"
-    )
+    print(f"Entrada: {input_file}")
+    print(f"Salida: {output_file}")
+    print("\nOptimizaciones activadas: Bicubic, Veryfast, CRF 23")
 
     command = [
         "ffmpeg",
-
+        "-hide_banner",
         "-y",
-
-        "-i",
-        input_file,
-
-        # ----------------------------------------------------
-        # ESCALADO
-        # ----------------------------------------------------
-
-        "-vf",
-        "scale=1920:1080:flags=lanczos",
-
-        # ----------------------------------------------------
-        # VIDEO
-        # ----------------------------------------------------
-
-        "-c:v",
-        "libx264",
-
-        # Calidad
-        "-crf",
-        "17",
-
-        # Mejor compresión.
-        # slow = más tiempo, mejor compresión.
-        "-preset",
-        "slow",
-
-        # ----------------------------------------------------
-        # AUDIO
-        # ----------------------------------------------------
-
-        "-c:a",
-        "copy",
-
-        # ----------------------------------------------------
-        # MP4
-        # ----------------------------------------------------
-
-        "-movflags",
-        "+faststart",
-
+        "-i", input_file,
+        
+        # Escalado más rápido
+        "-vf", "scale=1920:1080:flags=bicubic:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2",
+        
+        "-c:v", "libx264",
+        "-preset", "veryfast",   # Más rápido para no agotar el timeout de GitHub
+        "-crf", "23",            # Calidad balanceada
+        "-pix_fmt", "yuv420p",
+        
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-movflags", "+faststart",
         output_file
     ]
 
-    print()
-    print(
-        "Procesando video..."
-    )
-
-    print(
-        "Esto puede tardar bastante."
-    )
-
-    print()
+    print("\nProcesando video... Esto puede tardar bastante.\n")
 
     try:
-
-        result = subprocess.run(
-            command,
-            check=False
-        )
-
+        result = subprocess.run(command, check=False)
     except FileNotFoundError:
-
-        print(
-            "ERROR: FFmpeg no está instalado."
-        )
-
+        print("ERROR: FFmpeg no está instalado.")
         return False
 
     if result.returncode != 0:
-
-        print(
-            "ERROR: el upscale falló."
-        )
-
-        print(
-            f"Código: {result.returncode}"
-        )
-
+        print("ERROR: el upscale falló.")
+        print(f"Código: {result.returncode}")
         return False
 
-    print()
-    print(
-        "Upscale terminado correctamente."
-    )
-
+    print("\nUpscale terminado correctamente.")
     return True
 
 
@@ -384,154 +231,65 @@ def upscale_to_1080p(
 # SUBIR A FILESTER
 # ============================================================
 
-def upload_to_filester(
-    filename
-):
-
+def upload_to_filester(filename):
     print()
     print("=" * 70)
     print("3. SUBIENDO A FILESTER")
     print("=" * 70)
 
     headers = {
-        "Authorization":
-            f"Bearer {FILESTER_API_KEY}"
+        "Authorization": f"Bearer {FILESTER_API_KEY}"
     }
 
-    # Carpeta opcional
     if FILESTER_FOLDER_ID:
+        headers["X-Folder-ID"] = FILESTER_FOLDER_ID
 
-        headers[
-            "X-Folder-ID"
-        ] = FILESTER_FOLDER_ID
-
-    for attempt in range(
-        1,
-        UPLOAD_RETRIES + 1
-    ):
-
-        print()
-        print(
-            f"Intento "
-            f"{attempt}/"
-            f"{UPLOAD_RETRIES}"
-        )
+    for attempt in range(1, UPLOAD_RETRIES + 1):
+        print(f"\nIntento {attempt}/{UPLOAD_RETRIES}")
 
         try:
-
-            with open(
-                filename,
-                "rb"
-            ) as file:
-
+            with open(filename, "rb") as file:
                 files = {
-                    "file": (
-                        os.path.basename(
-                            filename
-                        ),
-                        file,
-                        "video/mp4"
-                    )
+                    "file": (os.path.basename(filename), file, "video/mp4")
                 }
 
                 response = requests.post(
                     FILESTER_UPLOAD_URL,
                     headers=headers,
                     files=files,
-
-                    # Una hora de timeout.
                     timeout=3600
                 )
 
-            print(
-                f"HTTP: "
-                f"{response.status_code}"
-            )
+            print(f"HTTP: {response.status_code}")
 
-            # Intentar leer JSON
             try:
-
                 data = response.json()
-
             except ValueError:
-
                 data = None
 
             if response.ok:
-
-                print()
-                print(
-                    "UPLOAD CORRECTO"
-                )
-
+                print("\nUPLOAD CORRECTO")
                 if data:
-
-                    print()
-                    print(
-                        "Respuesta de Filester:"
-                    )
-
-                    print(data)
-
                     if data.get("url"):
-
-                        print()
-                        print(
-                            "URL DE LA GRABACIÓN:"
-                        )
-
-                        print(
-                            data["url"]
-                        )
-
+                        print("\nURL DE LA GRABACIÓN:")
+                        print(data["url"])
                 return True
 
-            print()
-            print(
-                "La subida falló."
-            )
-
+            print("\nLa subida falló.")
             if data:
-
                 print(data)
-
             else:
-
-                print(
-                    response.text[:1000]
-                )
+                print(response.text[:1000])
 
         except requests.RequestException as error:
-
-            print()
-            print(
-                "Error de conexión:"
-            )
-
+            print("\nError de conexión:")
             print(error)
 
-        # ----------------------------------------------------
-        # REINTENTO
-        # ----------------------------------------------------
-
         if attempt < UPLOAD_RETRIES:
+            print(f"\nEsperando {RETRY_DELAY} segundos...")
+            time.sleep(RETRY_DELAY)
 
-            print()
-            print(
-                f"Esperando "
-                f"{RETRY_DELAY} segundos..."
-            )
-
-            time.sleep(
-                RETRY_DELAY
-            )
-
-    print()
-    print(
-        "ERROR: no se pudo subir "
-        "el archivo."
-    )
-
+    print("\nERROR: no se pudo subir el archivo.")
     return False
 
 
@@ -540,23 +298,11 @@ def upload_to_filester(
 # ============================================================
 
 def delete_file(filename):
-
     try:
-
         os.remove(filename)
-
-        print(
-            f"Archivo eliminado: "
-            f"{filename}"
-        )
-
+        print(f"Archivo eliminado: {filename}")
     except OSError as error:
-
-        print(
-            f"No se pudo eliminar "
-            f"{filename}"
-        )
-
+        print(f"No se pudo eliminar {filename}")
         print(error)
 
 
@@ -565,7 +311,6 @@ def delete_file(filename):
 # ============================================================
 
 def main():
-
     print()
     print("=" * 70)
     print("HLS RECORDER + 1080P UPSCALE")
@@ -574,128 +319,62 @@ def main():
     # --------------------------------------------------------
     # Nombres
     # --------------------------------------------------------
-
-    original_file, final_file = (
-        create_filenames()
-    )
-
-    print()
-    print(
-        f"Original: {original_file}"
-    )
-
-    print(
-        f"Final:    {final_file}"
-    )
+    original_file, final_file = create_filenames()
 
     # ========================================================
-    # PASO 1
-    # GRABAR 720P
+    # PASO 0: EXTRAER URL
     # ========================================================
+    m3u8_url = get_m3u8_url()
 
-    success = record_stream(
-        original_file
-    )
+    # ========================================================
+    # PASO 1: GRABAR HLS
+    # ========================================================
+    success = record_stream(m3u8_url, original_file)
 
     if not success:
-
-        print()
-        print(
-            "La grabación falló."
-        )
-
+        print("\nLa grabación falló.")
         sys.exit(1)
 
-    if not validate_file(
-        original_file
-    ):
-
+    if not validate_file(original_file):
         sys.exit(1)
 
     # ========================================================
-    # PASO 2
-    # UPSCALE
+    # PASO 2: UPSCALE
     # ========================================================
-
-    success = upscale_to_1080p(
-        original_file,
-        final_file
-    )
+    success = upscale_to_1080p(original_file, final_file)
 
     if not success:
-
-        print()
-        print(
-            "El procesamiento falló."
-        )
-
-        print(
-            "Se conserva el archivo "
-            f"original: {original_file}"
-        )
-
+        print("\nEl procesamiento falló.")
+        print(f"Se conserva el archivo original: {original_file}")
         sys.exit(1)
 
-    if not validate_file(
-        final_file
-    ):
-
+    if not validate_file(final_file):
         sys.exit(1)
 
     # ========================================================
-    # PASO 3
-    # SUBIR 1080P
+    # PASO 3: SUBIR 1080P
     # ========================================================
-
-    success = upload_to_filester(
-        final_file
-    )
+    success = upload_to_filester(final_file)
 
     if not success:
-
-        print()
-        print(
-            "La subida falló."
-        )
-
-        print(
-            "Los archivos locales "
-            "NO serán eliminados."
-        )
-
+        print("\nLa subida falló. Los archivos locales NO serán eliminados.")
         sys.exit(1)
 
     # ========================================================
-    # PASO 4
-    # LIMPIEZA
+    # PASO 4: LIMPIEZA
     # ========================================================
-
     print()
     print("=" * 70)
     print("4. LIMPIANDO ARCHIVOS")
     print("=" * 70)
 
-    # El original 720p ya no es necesario
-    delete_file(
-        original_file
-    )
+    delete_file(original_file)
+    delete_file(final_file)
 
-    # El 1080p también puede eliminarse
-    # después de confirmar el upload
-    delete_file(
-        final_file
-    )
-
-    print()
-    print("=" * 70)
+    print("\n" + "=" * 70)
     print("PROCESO COMPLETADO")
-    print("=" * 70)
-    print()
+    print("=" * 70 + "\n")
 
-
-# ============================================================
-# ENTRY POINT
-# ============================================================
 
 if __name__ == "__main__":
     main()
