@@ -47,61 +47,20 @@ def get_int_env(name, default):
 STREAM_PAGE_URL = get_str_env("STREAM_PAGE_URL", required=True)
 FILESTER_API_KEY = get_str_env("FILESTER_API_KEY", required=True)
 
-VIDEO2X = Path(os.path.expanduser("~/video2x/video2x.AppImage"))
+# Opcional: identificador de carpeta de Filester donde subir el archivo.
+# Si se deja vacío, se sube a la raíz de la cuenta.
+# Ver: https://filester.me/api-docs (header X-Folder-ID)
+FILESTER_FOLDER_ID = get_str_env("FILESTER_FOLDER_ID", default="")
 
 RECORDING_DURATION = get_int_env("RECORDING_DURATION", 30)
-
-# "ffmpeg": reescalado por interpolación (lanczos), rápido, sin GPU,
-#           recomendado en runners hosted de GitHub Actions (sin GPU real).
-# "video2x": super-resolución con Real-ESRGAN vía Video2X. Solo viable en
-#            un runner con GPU real (self-hosted); en CPU/Vulkan-software
-#            es extremadamente lento para videos largos.
-UPSCALE_METHOD = get_str_env("UPSCALE_METHOD", "ffmpeg").lower()
-
-VIDEO2X_SCALE = get_int_env("VIDEO2X_SCALE", 4)
-VIDEO2X_MODEL = get_str_env("VIDEO2X_MODEL", "realesrgan-plus")
-
-# El AppImage oficial de Video2X (probado en 6.4.0) solo trae empaquetado
-# el archivo de parámetros x4 para los modelos de Real-ESRGAN, aunque el
-# modelo original soporte otras escalas en otras implementaciones. Pedir
-# x2 o x3 falla con "param file not found" (ver issues #1216 y #1243 del
-# repo k4yt3x/video2x). Por eso el final SIEMPRE hay que reescalar/recortar
-# a 1920x1080 después de Video2X (ver create_1080p), sea cual sea la
-# resolución de entrada.
-REALESRGAN_MODEL_SCALES = {
-    "realesrgan-plus": {4},
-    "realesrgan-plus-anime": {4},
-    "realesr-animevideov3": {4},
-    "realesr-general-x4v3": {4},
-}
-
-
-def validate_config():
-    if UPSCALE_METHOD not in ("ffmpeg", "video2x"):
-        raise RuntimeError(
-            f"UPSCALE_METHOD='{UPSCALE_METHOD}' no es válido. "
-            f"Usa 'ffmpeg' o 'video2x'."
-        )
-
-    if UPSCALE_METHOD == "video2x":
-        allowed = REALESRGAN_MODEL_SCALES.get(VIDEO2X_MODEL)
-
-        if allowed and VIDEO2X_SCALE not in allowed:
-            raise RuntimeError(
-                f"El modelo '{VIDEO2X_MODEL}' no soporta escala x{VIDEO2X_SCALE}. "
-                f"Escalas soportadas: {sorted(allowed)}. "
-                f"Ajusta VIDEO2X_SCALE o VIDEO2X_MODEL."
-            )
 
 # Márgenes de seguridad para no colgar el job entero si algo se queda
 # esperando indefinidamente (red caída, stream que nunca corta, etc.).
 FFMPEG_TIMEOUT = RECORDING_DURATION + 300  # 5 min de margen sobre la duración
-VIDEO2X_TIMEOUT = get_int_env("VIDEO2X_TIMEOUT_SECONDS", 60 * 300)  # 5h por defecto
 
 WORK_DIR = Path("work")
 
 INPUT_VIDEO = WORK_DIR / "recorded_720p.mp4"
-UPSCALED_VIDEO = WORK_DIR / "upscaled.mp4"
 FINAL_VIDEO = WORK_DIR / "final_1080p.mp4"
 
 USER_AGENT = (
@@ -224,15 +183,6 @@ def check_environment():
     log("COMPROBANDO ENTORNO")
     log("=" * 70)
 
-    if UPSCALE_METHOD == "video2x":
-        if not VIDEO2X.exists():
-            raise RuntimeError(f"No existe Video2X: {VIDEO2X}")
-
-        if not os.access(VIDEO2X, os.X_OK):
-            raise RuntimeError(
-                f"Video2X no tiene permiso de ejecución: {VIDEO2X}"
-            )
-
     for program in ("ffmpeg", "ffprobe"):
         from shutil import which
 
@@ -241,10 +191,11 @@ def check_environment():
 
     log("✓ STREAM_PAGE_URL configurado")
     log("✓ FILESTER_API_KEY configurado")
-    log(f"✓ Método de escalado: {UPSCALE_METHOD}")
 
-    if UPSCALE_METHOD == "video2x":
-        log(f"✓ Video2X encontrado: {VIDEO2X}")
+    if FILESTER_FOLDER_ID:
+        log(f"✓ FILESTER_FOLDER_ID configurado: {FILESTER_FOLDER_ID}")
+    else:
+        log("✓ FILESTER_FOLDER_ID no configurado (se sube a la raíz)")
 
     log("✓ ffmpeg / ffprobe disponibles")
 
@@ -426,26 +377,14 @@ def video_info(video):
 
 
 # ============================================================================
-# ESCALADO
+# ESCALADO A 1080P (FFMPEG, LANCZOS)
 # ============================================================================
 
-def upscale_video():
-    if UPSCALE_METHOD == "video2x":
-        upscale_video_video2x()
-    else:
-        upscale_video_ffmpeg()
-
-
-def upscale_video_ffmpeg():
+def scale_to_1080p():
     """
-    Reescalado por interpolación (lanczos), sin IA. Rápido y no requiere
-    GPU. Es el método recomendado para runners hosted sin GPU real, donde
-    Video2X/Real-ESRGAN sería demasiado lento para videos largos.
-
-    A diferencia del método video2x, aquí se escribe directamente
-    FINAL_VIDEO (no UPSCALED_VIDEO): no tiene sentido escalar y luego
-    volver a re-codificar en create_1080p(), sería un segundo paso de
-    compresión con pérdida sin ningún beneficio.
+    Reescala directamente a 1920x1080 por interpolación (lanczos), sin IA.
+    No requiere GPU y es prácticamente instantáneo incluso para
+    grabaciones largas, a diferencia de un pipeline con super-resolución.
     """
 
     log()
@@ -483,105 +422,11 @@ def upscale_video_ffmpeg():
     size = FINAL_VIDEO.stat().st_size
 
     if size <= 0:
-        raise RuntimeError("El archivo generado por FFmpeg está vacío.")
+        raise RuntimeError("El archivo final está vacío.")
 
     log()
-    log("✓ Reescalado con FFmpeg terminado correctamente.")
+    log("✓ Video final creado.")
     log(f"✓ Archivo: {FINAL_VIDEO}")
-    log(f"✓ Tamaño: {size / 1024 / 1024:.2f} MB")
-
-
-def upscale_video_video2x():
-    """
-    Super-resolución con Real-ESRGAN vía Video2X. Solo recomendable en un
-    runner con GPU real; en CPU (Vulkan por software) es muy lento para
-    videos largos.
-    """
-
-    log()
-    log("=" * 70)
-    log("VIDEO2X - SUPER RESOLUCIÓN")
-    log("=" * 70)
-
-    if UPSCALED_VIDEO.exists():
-        UPSCALED_VIDEO.unlink()
-
-    command = [
-        str(VIDEO2X),
-        # Evita el error: dlopen(): error loading libfuse.so.2
-        "--appimage-extract-and-run",
-        "-i", str(INPUT_VIDEO),
-        "-o", str(UPSCALED_VIDEO),
-        "-p", "realesrgan",
-        "-s", str(VIDEO2X_SCALE),
-        "--realesrgan-model", VIDEO2X_MODEL,
-    ]
-
-    run_command(
-        command,
-        "VIDEO2X - REAL-ESRGAN / NCNN / VULKAN",
-        timeout=VIDEO2X_TIMEOUT,
-    )
-
-    if not UPSCALED_VIDEO.exists():
-        raise RuntimeError(
-            "Video2X terminó pero no creó el archivo upscaled.mp4."
-        )
-
-    size = UPSCALED_VIDEO.stat().st_size
-
-    if size <= 0:
-        raise RuntimeError("El archivo generado por Video2X está vacío.")
-
-    log()
-    log("✓ Video2X terminó correctamente.")
-    log(f"✓ Archivo: {UPSCALED_VIDEO}")
-    log(f"✓ Tamaño: {size / 1024 / 1024:.2f} MB")
-
-
-# ============================================================================
-# CREAR 1080P FINAL
-# ============================================================================
-
-def create_1080p():
-    log()
-    log("=" * 70)
-    log("GENERANDO VIDEO FINAL 1920x1080")
-    log("=" * 70)
-
-    if FINAL_VIDEO.exists():
-        FINAL_VIDEO.unlink()
-
-    command = [
-        "ffmpeg",
-        "-hide_banner",
-        "-i", str(UPSCALED_VIDEO),
-        "-vf", (
-            "scale=1920:1080:force_original_aspect_ratio=decrease,"
-            "pad=1920:1080:(ow-iw)/2:(oh-ih)/2"
-        ),
-        "-c:v", "libx264",
-        "-preset", "medium",
-        "-crf", "18",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-b:a", "192k",
-        "-movflags", "+faststart",
-        "-y", str(FINAL_VIDEO),
-    ]
-
-    run_command(command, "FFMPEG - MASTER FINAL 1080P", timeout=FFMPEG_TIMEOUT)
-
-    if not FINAL_VIDEO.exists():
-        raise RuntimeError("FFmpeg no creó el video final.")
-
-    size = FINAL_VIDEO.stat().st_size
-
-    if size <= 0:
-        raise RuntimeError("El video final está vacío.")
-
-    log()
-    log(f"✓ Video final creado: {FINAL_VIDEO}")
     log(f"✓ Tamaño: {size / 1024 / 1024:.2f} MB")
 
 
@@ -601,8 +446,16 @@ def upload_filester():
     url = "https://u1.filester.me/api/v1/upload"
     headers = {"Authorization": f"Bearer {FILESTER_API_KEY}"}
 
+    if FILESTER_FOLDER_ID:
+        headers["X-Folder-ID"] = FILESTER_FOLDER_ID
+
     log(f"Archivo: {FINAL_VIDEO.name}")
     log(f"Tamaño: {FINAL_VIDEO.stat().st_size / 1024 / 1024:.2f} MB")
+
+    if FILESTER_FOLDER_ID:
+        log(f"Carpeta destino: {FILESTER_FOLDER_ID}")
+    else:
+        log("Carpeta destino: raíz de la cuenta")
 
     max_attempts = 3
     last_error = None
@@ -624,7 +477,7 @@ def upload_filester():
             log(f"HTTP status: {response.status_code}")
 
             # No reintentamos errores de cliente no recuperables
-            # (credenciales inválidas, payload rechazado, etc.),
+            # (credenciales inválidas, carpeta inexistente, etc.),
             # salvo 429 (rate limit), donde sí tiene sentido esperar.
             if 400 <= response.status_code < 500 and response.status_code != 429:
                 response.raise_for_status()
@@ -634,7 +487,10 @@ def upload_filester():
             data = response.json()
 
             if not data.get("success", False):
-                raise RuntimeError("Filester respondió success=false.")
+                raise RuntimeError(
+                    "Filester respondió success=false: "
+                    + data.get("message", "sin detalle")
+                )
 
             log()
             log("=" * 70)
@@ -656,7 +512,16 @@ def upload_filester():
             status = exc.response.status_code if exc.response is not None else None
 
             if status is not None and 400 <= status < 500 and status != 429:
-                log(f"Error HTTP {status} no recuperable, no se reintenta: {exc}")
+                detail = ""
+                try:
+                    detail = exc.response.json().get("message", "")
+                except Exception:
+                    pass
+
+                log(
+                    f"Error HTTP {status} no recuperable, no se reintenta: "
+                    f"{detail or exc}"
+                )
                 raise
 
             last_error = str(exc)
@@ -687,7 +552,7 @@ def clean_work():
     log("LIMPIANDO ARCHIVOS TEMPORALES")
     log("=" * 70)
 
-    for file_path in [INPUT_VIDEO, UPSCALED_VIDEO, FINAL_VIDEO]:
+    for file_path in [INPUT_VIDEO, FINAL_VIDEO]:
         try:
             if file_path.exists():
                 file_path.unlink()
@@ -709,12 +574,7 @@ def main():
         log("RECORDER - INICIO")
         log("=" * 70)
         log(f"RECORDING_DURATION = {RECORDING_DURATION}s")
-        log(f"UPSCALE_METHOD = {UPSCALE_METHOD}")
-        if UPSCALE_METHOD == "video2x":
-            log(f"VIDEO2X_SCALE = {VIDEO2X_SCALE}x")
-            log(f"VIDEO2X_MODEL = {VIDEO2X_MODEL}")
 
-        validate_config()
         check_environment()
 
         m3u8_url = get_m3u8_url()
@@ -722,12 +582,7 @@ def main():
         record_stream(m3u8_url)
         video_info(INPUT_VIDEO)
 
-        upscale_video()
-
-        if UPSCALE_METHOD == "video2x":
-            video_info(UPSCALED_VIDEO)
-            create_1080p()
-
+        scale_to_1080p()
         video_info(FINAL_VIDEO)
 
         upload_filester()
