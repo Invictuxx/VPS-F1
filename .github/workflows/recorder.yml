@@ -7,13 +7,11 @@ on:
         description: "Duración de la grabación en segundos"
         required: false
         default: "7200"
-
   schedule:
     # Todos los días a las 23:00 UTC
     - cron: "0 23 * * *"
 
 # Evita que se acumulen ejecuciones si una anterior sigue corriendo
-# (por ejemplo, un run manual mientras el cron dispara otro).
 concurrency:
   group: recorder-${{ github.workflow }}
   cancel-in-progress: false
@@ -33,52 +31,63 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Verificar archivos del repositorio
+        run: |
+          \(missing =\)false
+          foreach ($f in "recorder.py", "requirements.txt") {
+            if (-Not (Test-Path $f)) {
+              Write-Host "::error::Falta el archivo '$f' en la raíz del repositorio."
+              \(missing =\)true
+            }
+          }
+
+          if ($missing) {
+            Write-Host "Archivos encontrados en el checkout:"
+            Get-ChildItem
+            exit 1
+          }
+
+          Write-Host "Archivos del repositorio OK."
+
       - name: Validar secrets requeridos
         run: |
-          set -e
-          missing=0
+          \(missing =\)false
 
-          if [ -z "${{ secrets.STREAM_PAGE_URL }}" ]; then
-            echo "::error::Falta el secret STREAM_PAGE_URL"
-            missing=1
-          fi
+          if ([string]::IsNullOrWhiteSpace("${{ secrets.STREAM_PAGE_URL }}")) {
+            Write-Host "::error::Falta el secret STREAM_PAGE_URL"
+            \(missing =\)true
+          }
 
-          if [ -z "${{ secrets.FILESTER_API_KEY }}" ]; then
-            echo "::error::Falta el secret FILESTER_API_KEY"
-            missing=1
-          fi
+          if ([string]::IsNullOrWhiteSpace("${{ secrets.FILESTER_API_KEY }}")) {
+            Write-Host "::error::Falta el secret FILESTER_API_KEY"
+            \(missing =\)true
+          }
 
-          if [ "$missing" -eq 1 ]; then
+          if ($missing) {
             exit 1
-          fi
+          }
 
-          echo "Secrets OK."
+          Write-Host "Secrets OK."
 
       - name: Instalar ffmpeg
         run: |
-          set -e
-
-          echo "======================================================================"
-          echo "INSTALANDO FFMPEG"
-          echo "======================================================================"
-
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
-
-          echo
-          echo "FFmpeg:"
-          ffmpeg -version | head -n 1
+          Write-Host "======================================================================"
+          Write-Host "INSTALANDO FFMPEG"
+          Write-Host "======================================================================"
+          
+          choco install ffmpeg -y
+          
+          Write-Host ""
+          Write-Host "FFmpeg:"
+          ffmpeg -version | Select-Object -First 1
 
       - name: Configurar Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-          cache: "pip"
 
       - name: Instalar dependencias Python
         run: |
-          set -e
-
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
@@ -87,14 +96,11 @@ jobs:
           STREAM_PAGE_URL: ${{ secrets.STREAM_PAGE_URL }}
           FILESTER_API_KEY: ${{ secrets.FILESTER_API_KEY }}
           FILESTER_FOLDER_ID: ${{ secrets.FILESTER_FOLDER_ID }}
-
         run: |
-          set -e
-
-          echo "======================================================================"
-          echo "INICIANDO GRABADOR"
-          echo "======================================================================"
-          echo "RECORDING_DURATION=$RECORDING_DURATION"
+          Write-Host "======================================================================"
+          Write-Host "INICIANDO GRABADOR"
+          Write-Host "======================================================================"
+          Write-Host "RECORDING_DURATION=$env:RECORDING_DURATION"
 
           python recorder.py
 
@@ -103,6 +109,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: work-debug-${{ github.run_id }}
-          path: work/
+          path: work\
           retention-days: 3
           if-no-files-found: ignore
