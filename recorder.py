@@ -111,7 +111,7 @@ def record_stream(output_file):
     print("=" * 70)
 
     print(f"URL:")
-    print(M3U8_URL)
+    print(STREAM_PAGE_URL)
 
     print()
     print(
@@ -142,7 +142,7 @@ def record_stream(output_file):
 
         # HLS
         "-i",
-        M3U8_URL,
+        STREAM_PAGE_URL,
 
         # Una hora
         "-t",
