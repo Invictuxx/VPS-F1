@@ -101,6 +101,7 @@ jobs:
           STREAM_PAGE_URL: ${{ secrets.STREAM_PAGE_URL }}
           FILESTER_API_KEY: ${{ secrets.FILESTER_API_KEY }}
           FILESTER_FOLDER_ID: ${{ secrets.FILESTER_FOLDER_ID }}
+          PYTHONIOENCODING: "utf-8"  # <-- Añade esta línea
         run: |
           Write-Host "======================================================================"
           Write-Host "INICIANDO GRABADOR"
