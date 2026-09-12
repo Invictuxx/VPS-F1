@@ -1,0 +1,116 @@
+name: Grabar stream y subir a Filester
+
+on:
+  workflow_dispatch:
+    inputs:
+      recording_duration:
+        description: "Duración de la grabación en segundos"
+        required: false
+        default: "7200"
+      upscale_method:
+        description: "Método de escalado a 1080p"
+        required: false
+        default: "ffmpeg"
+        type: choice
+        options:
+          - "ffmpeg"
+
+  schedule:
+    # Todos los días a las 23:00 UTC
+    - cron: "0 23 * * *"
+
+# Evita que se acumulen ejecuciones si una anterior sigue corriendo
+# (por ejemplo, un run manual mientras el cron dispara otro).
+concurrency:
+  group: recorder-${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    env:
+      RECORDING_DURATION: ${{ github.event.inputs.recording_duration || '7200' }}
+      UPSCALE_METHOD: ${{ github.event.inputs.upscale_method || 'ffmpeg' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validar secrets requeridos
+        run: |
+          set -e
+          missing=0
+
+          if [ -z "${{ secrets.STREAM_PAGE_URL }}" ]; then
+            echo "::error::Falta el secret STREAM_PAGE_URL"
+            missing=1
+          fi
+
+          if [ -z "${{ secrets.FILESTER_API_KEY }}" ]; then
+            echo "::error::Falta el secret FILESTER_API_KEY"
+            missing=1
+          fi
+
+          if [ "$missing" -eq 1 ]; then
+            exit 1
+          fi
+
+          echo "Secrets OK."
+
+      - name: Instalar ffmpeg
+        run: |
+          set -e
+
+          echo "======================================================================"
+          echo "INSTALANDO FFMPEG"
+          echo "======================================================================"
+
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+          echo
+          echo "FFmpeg:"
+          ffmpeg -version | head -n 1
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: "pip"
+
+      - name: Instalar dependencias Python
+        run: |
+          set -e
+
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Ejecutar grabador
+        env:
+          STREAM_PAGE_URL: ${{ secrets.STREAM_PAGE_URL }}
+          FILESTER_API_KEY: ${{ secrets.FILESTER_API_KEY }}
+
+        run: |
+          set -e
+
+          echo "======================================================================"
+          echo "INICIANDO GRABADOR"
+          echo "======================================================================"
+          echo "RECORDING_DURATION=$RECORDING_DURATION"
+          echo "UPSCALE_METHOD=$UPSCALE_METHOD"
+
+          python recorder.py
+
+      - name: Subir archivos de trabajo si algo falló
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: work-debug-${{ github.run_id }}
+          path: work/
+          retention-days: 3
+          if-no-files-found: ignore
