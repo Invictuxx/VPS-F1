@@ -1,11 +1,37 @@
 import os
+import re
 import sys
 import time
+import shlex
 import subprocess
-from datetime import datetime
 from pathlib import Path
-
+from urllib.parse import urlsplit
 import requests
+
+# ============================================================================
+# UTILIDADES DE CONFIGURACIÓN
+# ============================================================================
+
+def get_str_env(name, default="", required=False):
+    value = os.environ.get(name, default).strip()
+    if required and not value:
+        print(f"ERROR DE CONFIGURACIÓN: falta la variable {name}.", flush=True)
+        sys.exit(1)
+    return value
+
+def get_int_env(name, default):
+    raw = os.environ.get(name, str(default)).strip()
+    if not raw:
+        raw = str(default)
+    try:
+        return int(raw)
+    except ValueError:
+        print(
+            f"ERROR DE CONFIGURACIÓN: {name}='{raw}' no es un entero válido.",
+            flush=True,
+        )
+        sys.exit(1)
+
 
 
 # ============================================================
