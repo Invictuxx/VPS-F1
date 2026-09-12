@@ -32,42 +32,47 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Verificar archivos del repositorio
+        shell: bash
         run: |
-          \(missing =\)false
-          foreach ($f in "recorder.py", "requirements.txt") {
-            if (-Not (Test-Path $f)) {
-              Write-Host "::error::Falta el archivo '$f' en la raíz del repositorio."
-              \(missing =\)true
-            }
-          }
+          set -e
+          missing=0
 
-          if ($missing) {
-            Write-Host "Archivos encontrados en el checkout:"
-            Get-ChildItem
+          for f in recorder.py requirements.txt; do
+            if [ ! -f "$f" ]; then
+              echo "::error::Falta el archivo '$f' en la raíz del repositorio."
+              missing=1
+            fi
+          done
+
+          if [ "$missing" -eq 1 ]; then
+            echo "Archivos encontrados en el checkout:"
+            ls -la
             exit 1
-          }
+          fi
 
-          Write-Host "Archivos del repositorio OK."
+          echo "Archivos del repositorio OK."
 
       - name: Validar secrets requeridos
+        shell: bash
         run: |
-          \(missing =\)false
+          set -e
+          missing=0
 
-          if ([string]::IsNullOrWhiteSpace("${{ secrets.STREAM_PAGE_URL }}")) {
-            Write-Host "::error::Falta el secret STREAM_PAGE_URL"
-            \(missing =\)true
-          }
+          if [ -z "${{ secrets.STREAM_PAGE_URL }}" ]; then
+            echo "::error::Falta el secret STREAM_PAGE_URL"
+            missing=1
+          fi
 
-          if ([string]::IsNullOrWhiteSpace("${{ secrets.FILESTER_API_KEY }}")) {
-            Write-Host "::error::Falta el secret FILESTER_API_KEY"
-            \(missing =\)true
-          }
+          if [ -z "${{ secrets.FILESTER_API_KEY }}" ]; then
+            echo "::error::Falta el secret FILESTER_API_KEY"
+            missing=1
+          fi
 
-          if ($missing) {
+          if [ "$missing" -eq 1 ]; then
             exit 1
-          }
+          fi
 
-          Write-Host "Secrets OK."
+          echo "Secrets OK."
 
       - name: Instalar ffmpeg
         run: |
