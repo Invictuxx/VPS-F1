@@ -60,7 +60,7 @@ FFMPEG_TIMEOUT = RECORDING_DURATION + 300  # 5 min de margen sobre la duración
 
 WORK_DIR = Path("work")
 
-INPUT_VIDEO = WORK_DIR / "recorded_720p.mp4"
+INPUT_VIDEO = WORK_DIR / "recorded_720p.ts"
 FINAL_VIDEO = WORK_DIR / "final_1080p.mp4"
 
 USER_AGENT = (
@@ -308,6 +308,7 @@ def record_stream(m3u8_url):
     command = [
         "ffmpeg",
         "-hide_banner",
+        "-fflags", "+genpts",            # <-- NUEVO: Repara timestamps rotos del stream
         "-reconnect", "1",
         "-reconnect_streamed", "1",
         "-reconnect_delay_max", "10",
@@ -318,9 +319,7 @@ def record_stream(m3u8_url):
         "-map", "0:a?",
         "-c:v", "copy",
         "-c:a", "copy",
-        "-bsf:a", "aac_adtstoasc",
-        "-movflags", "+faststart",
-        "-y", str(INPUT_VIDEO),
+        "-y", str(INPUT_VIDEO),          # <-- Guarda como .ts (el formato más seguro)
     ]
 
     run_command(command, "FFMPEG - GRABACIÓN 720P", timeout=FFMPEG_TIMEOUT)
