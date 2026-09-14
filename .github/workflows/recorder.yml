@@ -2,6 +2,11 @@ name: Grabar stream directo y subir a Filester
 
 on:
   workflow_dispatch:
+   inputs:
+     file_name:
+      description: "Nombre del archivo (sin extensión). Vacío = automático"
+      required: false
+      default: ""
 # Evita que se solapen ejecuciones si una tarda más de la cuenta
 concurrency:
   group: recorder-${{ github.workflow }}
@@ -61,5 +66,6 @@ jobs:
           FILESTER_FOLDER_ID: ${{ secrets.FILESTER_FOLDER_ID }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          CUSTOM_FILE_NAME: ${{ github.event.inputs.file_name }}
         run: |
           python recorder.py
