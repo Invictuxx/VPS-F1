@@ -5,35 +5,140 @@ import time
 import subprocess
 from datetime import datetime
 from pathlib import Path
-
 import requests
-
 
 # ============================================================
 # CONFIGURACIÓN (Desde GitHub Actions)
 # ============================================================
-
-# Ahora lee la página web desde los secrets de Actions
 STREAM_PAGE_URL = os.environ.get("STREAM_PAGE_URL", "")
-
-# Credenciales de Filester
-FILESTER_API_KEY = os.environ.get("FILESTER_API_KEY", "TWQwwjc2Jp1lDyVkd4AViqE3h4Nxnfbx")
-FILESTER_FOLDER_ID = os.environ.get("FILESTER_FOLDER_ID", "e0bccad1b2ca55ff")
-
-# Duración de la grabación.
+FILESTER_API_KEY = os.environ.get("FILESTER_API_KEY")
+FILESTER_FOLDER_ID = os.environ.get("FILESTER_FOLDER_ID")
 RECORDING_DURATION = int(os.environ.get("RECORDING_DURATION", "30"))
-
-# Número de intentos para subir a Filester.
 UPLOAD_RETRIES = int(os.environ.get("UPLOAD_RETRIES", "5"))
-
-# Segundos entre intentos.
 RETRY_DELAY = int(os.environ.get("RETRY_DELAY", "30"))
-
-# URL de la API de Filester.
 FILESTER_UPLOAD_URL = "https://u1.filester.me/api/v1/upload"
 
+def create_filename():
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    return f"grabacion_{timestamp}_original.mp4"
 
-# ============================================================
+def javascript_unescape(value):
+    value = value.replace("\\/", "/").replace("\\u0026", "&").replace("\\x26", "&").replace("&amp;", "&")
+    return value
+
+def get_m3u8_url():
+    print("\n" + "=" * 70 + "\n0. OBTENIENDO ENLACE M3U8\n" + "=" * 70)
+    if not STREAM_PAGE_URL:
+        print("ERROR: La variable STREAM_PAGE_URL no está configurada.")
+        sys.exit(1)
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    }
+    
+    response = requests.get(STREAM_PAGE_URL, headers=headers, timeout=30)
+    response.raise_for_status()
+    html = response.text
+
+    patterns = [
+        r'playbackURL\s*=\s*"([^"]+)"', r"playbackURL\s*=\s*'([^']+)'",
+        r'"playbackURL"\s*:\s*"([^"]+)"', r"'playbackURL'\s*:\s*'([^']+)'",
+        r'https?:\\?/\\?/[^"\']+?\.m3u8[^"\']*'
+    ]
+
+    m3u8_url = None
+    for pattern in patterns:
+        match = re.search(pattern, html, re.IGNORECASE)
+        if match:
+            m3u8_url = match.group(1) if len(match.groups()) > 0 else match.group(0)
+            break
+
+    if not m3u8_url:
+        print("ERROR: No se encontró playbackURL ni una URL .m3u8.")
+        sys.exit(1)
+
+    m3u8_url = javascript_unescape(m3u8_url).strip()
+    print(f"M3U8 Extraído: {m3u8_url}")
+    return m3u8_url
+
+def record_stream(m3u8_url, output_file):
+    print("\n" + "=" * 70 + "\n1. INICIANDO GRABACIÓN DIRECTA\n" + "=" * 70)
+    print(f"Duración: {RECORDING_DURATION} segundos")
+    
+    command = [
+        "ffmpeg",
+        "-hide_banner", "-y",
+        "-fflags", "+genpts",
+        "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "10",
+        "-i", m3u8_url,
+        "-t", str(RECORDING_DURATION),
+        "-c:v", "copy",          # Copia el video sin usar CPU
+        "-c:a", "copy",          # Copia el audio sin usar CPU
+        "-bsf:a", "aac_adtstoasc", # Repara el audio para contenedores MP4
+        "-movflags", "+faststart", # Prepara el MP4 para ser reproducido en la web
+        output_file
+    ]
+
+    try:
+        result = subprocess.run(command, check=False)
+        if result.returncode != 0:
+            print(f"ERROR: FFmpeg terminó con código {result.returncode}")
+            return False
+        return True
+    except FileNotFoundError:
+        print("ERROR: FFmpeg no está instalado.")
+        return False
+
+def upload_to_filester(filename):
+    print("\n" + "=" * 70 + "\n2. SUBIENDO A FILESTER\n" + "=" * 70)
+    headers = {"Authorization": f"Bearer {FILESTER_API_KEY}"}
+    if FILESTER_FOLDER_ID:
+        headers["X-Folder-ID"] = FILESTER_FOLDER_ID
+
+    for attempt in range(1, UPLOAD_RETRIES + 1):
+        print(f"\nIntento {attempt}/{UPLOAD_RETRIES}")
+        try:
+            with open(filename, "rb") as file:
+                files = {"file": (os.path.basename(filename), file, "video/mp4")}
+                response = requests.post(FILESTER_UPLOAD_URL, headers=headers, files=files, timeout=3600)
+            
+            if response.ok:
+                print("\nUPLOAD CORRECTO")
+                try:
+                    data = response.json()
+                    if data and data.get("url"):
+                        print(f"URL DE LA GRABACIÓN: {data['url']}")
+                except ValueError:
+                    pass
+                return True
+            print(f"La subida falló: {response.text[:1000]}")
+        except requests.RequestException as error:
+            print(f"Error de conexión: {error}")
+        
+        if attempt < UPLOAD_RETRIES:
+            time.sleep(RETRY_DELAY)
+            
+    return False
+
+def main():
+    print("\n" + "=" * 70 + "\nHLS RECORDER (SOLO GRABACIÓN DIRECTA)\n" + "=" * 70)
+    
+    video_file = create_filename()
+    m3u8_url = get_m3u8_url()
+    
+    if not record_stream(m3u8_url, video_file):
+        sys.exit(1)
+        
+    if not upload_to_filester(video_file):
+        sys.exit(1)
+        
+    print("\n3. LIMPIANDO ARCHIVOS")
+    os.remove(video_file)
+    print("PROCESO COMPLETADO EXITOSAMENTE\n")
+
+if __name__ == "__main__":
+    main()
 # CREAR NOMBRES
 # ============================================================
 
