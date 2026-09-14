@@ -13,7 +13,7 @@ import requests
 STREAM_PAGE_URL = os.environ.get("STREAM_PAGE_URL", "")
 FILESTER_API_KEY = os.environ.get("FILESTER_API_KEY")
 FILESTER_FOLDER_ID = os.environ.get("FILESTER_FOLDER_ID")
-RECORDING_DURATION = int("30")
+RECORDING_DURATION = int(os.environ.get("RECORDING_DURATION", "30"))
 UPLOAD_RETRIES = int(os.environ.get("UPLOAD_RETRIES", "5"))
 RETRY_DELAY = int(os.environ.get("RETRY_DELAY", "30"))
 FILESTER_UPLOAD_URL = "https://u1.filester.me/api/v1/upload"
@@ -21,6 +21,8 @@ FILESTER_UPLOAD_URL = "https://u1.filester.me/api/v1/upload"
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 TELEGRAM_ENABLED = bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
+
+CUSTOM_FILE_NAME = os.environ.get("CUSTOM_FILE_NAME", "").strip()
 
 CHECK_INTERVAL_SECONDS = 3600  # Aviso de estado cada 1 hora
 POLL_INTERVAL_SECONDS = 30     # Cada cuánto se revisa si ffmpeg sigue vivo
@@ -53,8 +55,23 @@ def send_telegram(message):
 # ============================================================
 # CREAR NOMBRE DE ARCHIVO
 # ============================================================
+def sanitize_filename(name):
+    # Quita caracteres inválidos para nombres de archivo en Windows/Linux
+    name = re.sub(r'[<>:"/\\|?*]', "", name)
+    name = name.strip().strip(".")
+    return name
+
+
 def create_filename():
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+    if CUSTOM_FILE_NAME:
+        clean_name = sanitize_filename(CUSTOM_FILE_NAME)
+        if clean_name:
+            # Se agrega el timestamp también para evitar sobreescribir archivos
+            # si se dispara dos veces el mismo día con el mismo nombre.
+            return f"{clean_name}_{timestamp}.mp4"
+
     return f"grabacion_{timestamp}.mp4"
 
 
@@ -323,4 +340,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+                          
