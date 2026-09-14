@@ -2,15 +2,6 @@ name: Grabar stream directo y subir a Filester
 
 on:
   workflow_dispatch:
-    inputs:
-      recording_duration:
-        description: "Duración en segundos (10800 = 3 horas)"
-        required: false
-        default: "10800"
-  schedule:
-    # Se ejecuta todos los días a las 23:00 UTC
-    - cron: "0 23 * * *"
-
 # Evita que se solapen ejecuciones si una tarda más de la cuenta
 concurrency:
   group: recorder-${{ github.workflow }}
@@ -26,8 +17,6 @@ jobs:
     timeout-minutes: 360
 
     env:
-      # Si se ejecuta manualmente usa el valor del input, si es por cron usa 10800 (3 horas)
-      RECORDING_DURATION: ${{ github.event.inputs.recording_duration || '10800' }}
       # Evita errores de caracteres especiales en la consola de Windows
       PYTHONIOENCODING: "utf-8"
 
@@ -70,9 +59,7 @@ jobs:
           STREAM_PAGE_URL: ${{ secrets.STREAM_PAGE_URL }}
           FILESTER_API_KEY: ${{ secrets.FILESTER_API_KEY }}
           FILESTER_FOLDER_ID: ${{ secrets.FILESTER_FOLDER_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          Write-Host "======================================================================"
-          Write-Host "INICIANDO PROCESO (GRABACIÓN DIRECTA)"
-          Write-Host "======================================================================"
           python recorder.py
-          
