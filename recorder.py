@@ -13,10 +13,41 @@ import requests
 STREAM_PAGE_URL = os.environ.get("STREAM_PAGE_URL", "")
 FILESTER_API_KEY = os.environ.get("FILESTER_API_KEY")
 FILESTER_FOLDER_ID = os.environ.get("FILESTER_FOLDER_ID")
-RECORDING_DURATION = int(os.environ.get("RECORDING_DURATION", "30"))
+RECORDING_DURATION = int("30")
 UPLOAD_RETRIES = int(os.environ.get("UPLOAD_RETRIES", "5"))
 RETRY_DELAY = int(os.environ.get("RETRY_DELAY", "30"))
 FILESTER_UPLOAD_URL = "https://u1.filester.me/api/v1/upload"
+
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+TELEGRAM_ENABLED = bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
+
+CHECK_INTERVAL_SECONDS = 3600  # Aviso de estado cada 1 hora
+POLL_INTERVAL_SECONDS = 30     # Cada cuánto se revisa si ffmpeg sigue vivo
+SAFETY_MARGIN_SECONDS = 300    # Margen extra antes de matar ffmpeg por si tarda en cerrar
+
+
+# ============================================================
+# TELEGRAM
+# ============================================================
+def send_telegram(message):
+    if not TELEGRAM_ENABLED:
+        return
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        requests.post(
+            url,
+            data={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": message,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": False,
+            },
+            timeout=15,
+        )
+    except requests.RequestException as error:
+        # Si Telegram falla, no debe tumbar el proceso principal
+        print(f"AVISO: no se pudo enviar mensaje a Telegram: {error}")
 
 
 # ============================================================
@@ -41,8 +72,7 @@ def get_m3u8_url():
     print("\n" + "=" * 70 + "\n0. OBTENIENDO ENLACE M3U8\n" + "=" * 70)
 
     if not STREAM_PAGE_URL:
-        print("ERROR: La variable STREAM_PAGE_URL no está configurada.")
-        sys.exit(1)
+        raise RuntimeError("La variable STREAM_PAGE_URL no está configurada.")
 
     print(f"Página: {STREAM_PAGE_URL}")
 
@@ -74,8 +104,7 @@ def get_m3u8_url():
             break
 
     if not m3u8_url:
-        print("ERROR: No se encontró playbackURL ni una URL .m3u8 en el HTML.")
-        sys.exit(1)
+        raise RuntimeError("No se encontró playbackURL ni una URL .m3u8 en el HTML.")
 
     m3u8_url = javascript_unescape(m3u8_url).strip()
     print(f"M3U8 Extraído: {m3u8_url}")
@@ -83,39 +112,94 @@ def get_m3u8_url():
 
 
 # ============================================================
-# GRABAR STREAM HLS
+# GRABAR STREAM HLS (con monitoreo periódico)
 # ============================================================
 def record_stream(m3u8_url, output_file):
     print("\n" + "=" * 70 + "\n1. INICIANDO GRABACIÓN HLS\n" + "=" * 70)
-    print(f"Duración: {RECORDING_DURATION} segundos")
+    print(f"Duración objetivo: {RECORDING_DURATION} segundos")
     print(f"Archivo: {output_file}")
 
     command = [
         "ffmpeg",
         "-hide_banner", "-y",
-        "-fflags", "+genpts",          # Repara timestamps rotos
+        "-fflags", "+genpts",
         "-reconnect", "1",
         "-reconnect_streamed", "1",
         "-reconnect_delay_max", "10",
         "-i", m3u8_url,
         "-t", str(RECORDING_DURATION),
-        "-c:v", "copy",                 # Copia video sin recodificar (rápido, sin CPU)
+        "-c:v", "copy",
         "-c:a", "copy",
-        "-bsf:a", "aac_adtstoasc",      # Repara audio para contenedor MP4
-        "-movflags", "+faststart",      # MP4 listo para reproducirse en la web
+        "-bsf:a", "aac_adtstoasc",
+        "-movflags", "+faststart",
         output_file,
     ]
 
     print("\nEjecutando FFmpeg...\n")
-    try:
-        result = subprocess.run(command, check=False)
-    except FileNotFoundError:
-        print("ERROR: FFmpeg no está instalado.")
-        return False
 
-    if result.returncode != 0:
-        print(f"ERROR: FFmpeg terminó con código {result.returncode}")
-        return False
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        raise RuntimeError("FFmpeg no está instalado.")
+
+    send_telegram(
+        f"🎬 <b>Grabación iniciada</b>\n"
+        f"Archivo: {output_file}\n"
+        f"Duración objetivo: {RECORDING_DURATION // 60} min"
+    )
+
+    start_time = time.time()
+    last_check = start_time
+    last_size = 0
+    max_seconds = RECORDING_DURATION + SAFETY_MARGIN_SECONDS
+    killed_for_timeout = False
+
+    while True:
+        ret = process.poll()
+        if ret is not None:
+            break
+
+        now = time.time()
+        elapsed = now - start_time
+
+        # Si ffmpeg no cerró solo tras duración + margen, lo matamos
+        if elapsed > max_seconds:
+            process.kill()
+            killed_for_timeout = True
+            break
+
+        # Aviso periódico de estado
+        if now - last_check >= CHECK_INTERVAL_SECONDS:
+            current_size = Path(output_file).stat().st_size if Path(output_file).exists() else 0
+            growing = current_size > last_size
+            size_mb = current_size / (1024 * 1024)
+            elapsed_min = int(elapsed / 60)
+
+            process_status = "✅ corriendo" if process.poll() is None else "❌ detenido"
+            size_status = "✅ creciendo" if growing else "⚠️ NO está creciendo"
+
+            send_telegram(
+                f"🎥 <b>Grabación en curso</b> ({elapsed_min} min)\n"
+                f"Proceso: {process_status}\n"
+                f"Tamaño: {size_mb:.1f} MB — {size_status}"
+            )
+
+            last_size = current_size
+            last_check = now
+
+        time.sleep(POLL_INTERVAL_SECONDS)
+
+    if killed_for_timeout:
+        raise RuntimeError(
+            f"FFmpeg no terminó tras {max_seconds} segundos y fue detenido manualmente."
+        )
+
+    if process.returncode != 0:
+        raise RuntimeError(f"FFmpeg terminó con código {process.returncode}")
 
     print("\nGrabación terminada correctamente.")
     return True
@@ -128,13 +212,11 @@ def validate_file(filename):
     path = Path(filename)
 
     if not path.exists():
-        print(f"ERROR: no existe {filename}")
-        return False
+        raise RuntimeError(f"No existe el archivo {filename}")
 
     size = path.stat().st_size
     if size <= 0:
-        print(f"ERROR: {filename} está vacío.")
-        return False
+        raise RuntimeError(f"El archivo {filename} está vacío.")
 
     size_mb = size / (1024 * 1024)
     size_gb = size / (1024 * 1024 * 1024)
@@ -152,6 +234,8 @@ def upload_to_filester(filename):
     headers = {"Authorization": f"Bearer {FILESTER_API_KEY}"}
     if FILESTER_FOLDER_ID:
         headers["X-Folder-ID"] = FILESTER_FOLDER_ID
+
+    last_error = None
 
     for attempt in range(1, UPLOAD_RETRIES + 1):
         print(f"\nIntento {attempt}/{UPLOAD_RETRIES}")
@@ -171,15 +255,17 @@ def upload_to_filester(filename):
 
             if response.ok:
                 print("\nUPLOAD CORRECTO")
-                if data and data.get("url"):
-                    print("\nURL DE LA GRABACIÓN:")
-                    print(data["url"])
-                return True
+                url = data.get("url") if data else None
+                if url:
+                    print(f"\nURL DE LA GRABACIÓN:\n{url}")
+                return True, url
 
+            last_error = data if data else response.text[:1000]
             print("\nLa subida falló.")
-            print(data if data else response.text[:1000])
+            print(last_error)
 
         except requests.RequestException as error:
+            last_error = str(error)
             print("\nError de conexión:")
             print(error)
 
@@ -187,8 +273,7 @@ def upload_to_filester(filename):
             print(f"\nEsperando {RETRY_DELAY} segundos...")
             time.sleep(RETRY_DELAY)
 
-    print("\nERROR: no se pudo subir el archivo.")
-    return False
+    raise RuntimeError(f"No se pudo subir el archivo tras {UPLOAD_RETRIES} intentos. Último error: {last_error}")
 
 
 # ============================================================
@@ -210,27 +295,30 @@ def main():
 
     video_file = create_filename()
 
-    # PASO 0: Extraer URL m3u8
-    m3u8_url = get_m3u8_url()
+    try:
+        m3u8_url = get_m3u8_url()
+        record_stream(m3u8_url, video_file)
+        validate_file(video_file)
+        success, url = upload_to_filester(video_file)
 
-    # PASO 1: Grabar
-    if not record_stream(m3u8_url, video_file):
-        print("\nLa grabación falló.")
+        print("\n" + "=" * 70 + "\n3. LIMPIANDO ARCHIVOS\n" + "=" * 70)
+        delete_file(video_file)
+
+        if url:
+            send_telegram(f"✅ <b>Proceso completado</b>\n\nEnlace: {url}")
+        else:
+            send_telegram(
+                "✅ <b>Proceso completado</b>\n\n"
+                "Subida correcta, pero Filester no devolvió un enlace en la respuesta. "
+                "Revisa el panel de Filester."
+            )
+
+        print("\n" + "=" * 70 + "\nPROCESO COMPLETADO\n" + "=" * 70 + "\n")
+
+    except Exception as error:
+        print(f"\nERROR FATAL: {error}")
+        send_telegram(f"❌ <b>Error en la grabación</b>\n\n{error}")
         sys.exit(1)
-
-    if not validate_file(video_file):
-        sys.exit(1)
-
-    # PASO 2: Subir el archivo grabado (sin escalar)
-    if not upload_to_filester(video_file):
-        print("\nLa subida falló. El archivo local NO será eliminado.")
-        sys.exit(1)
-
-    # PASO 3: Limpieza
-    print("\n" + "=" * 70 + "\n3. LIMPIANDO ARCHIVOS\n" + "=" * 70)
-    delete_file(video_file)
-
-    print("\n" + "=" * 70 + "\nPROCESO COMPLETADO\n" + "=" * 70 + "\n")
 
 
 if __name__ == "__main__":
