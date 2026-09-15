@@ -3,6 +3,10 @@ name: Grabar stream directo y subir a Filester
 on:
   workflow_dispatch:
    inputs:
+     recording_duration:
+      description: "Duración en segundos (10800 = 3 Horas"
+      required: false
+      default: "10800"
      file_name:
       description: "Nombre del archivo (sin extensión). Vacío = automático"
       required: false
