@@ -71,5 +71,6 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           CUSTOM_FILE_NAME: ${{ github.event.inputs.file_name }}
+          RECORDING_DURATION: ${{ github.event.inputs.recording_duration }}
         run: |
           python recorder.py
