@@ -1,17 +1,28 @@
-name: Grabar stream directo y subir a Filester
+name: Grabar stream y subir archivo
 
 on:
   workflow_dispatch:
-   inputs:
-     recording_duration:
-      description: "Duración en segundos (10800 = 3 Horas"
-      required: false
-      default: "10800"
-     file_name:
-      description: "Nombre del archivo (sin extensión). Vacío = automático"
-      required: false
-      default: ""
-# Evita que se solapen ejecuciones si una tarda más de la cuenta
+    inputs:
+
+      upload_server:
+        description: "Servidor donde subir el archivo"
+        required: true
+        type: choice
+        options:
+          - filester
+          - vikingfile
+        default: filester
+
+      recording_duration:
+        description: "Duración en segundos (10800 = 3 horas)"
+        required: false
+        default: "10800"
+
+      file_name:
+        description: "Nombre del archivo sin extensión"
+        required: false
+        default: ""
+
 concurrency:
   group: recorder-${{ github.workflow }}
   cancel-in-progress: false
@@ -20,57 +31,143 @@ permissions:
   contents: read
 
 jobs:
+
   record:
+
     runs-on: windows-latest
-    # El trabajo terminará en ~3 horas, pero mantenemos el límite en 6 por seguridad
+
     timeout-minutes: 360
 
     env:
-      # Evita errores de caracteres especiales en la consola de Windows
       PYTHONIOENCODING: "utf-8"
 
     steps:
+
+      # ======================================================
+      # CHECKOUT
+      # ======================================================
+
       - name: Checkout del repositorio
         uses: actions/checkout@v4
 
-      - name: Validar secrets requeridos
+
+      # ======================================================
+      # VALIDAR CONFIGURACIÓN
+      # ======================================================
+
+      - name: Validar configuración
+        shell: powershell
         run: |
+
           $missing = $false
-          if ([string]::IsNullOrWhiteSpace("${{ secrets.STREAM_PAGE_URL }}")) {
-            Write-Host "::error::Falta el secret STREAM_PAGE_URL"
+
+          if (
+            [string]::IsNullOrWhiteSpace(
+              "${{ secrets.STREAM_PAGE_URL }}"
+            )
+          ) {
+            Write-Host "::error::Falta STREAM_PAGE_URL"
             $missing = $true
           }
-          if ([string]::IsNullOrWhiteSpace("${{ secrets.FILESTER_API_KEY }}")) {
-            Write-Host "::error::Falta el secret FILESTER_API_KEY"
-            $missing = $true
+
+          $server = "${{ github.event.inputs.upload_server }}"
+
+          if ($server -eq "filester") {
+
+            if (
+              [string]::IsNullOrWhiteSpace(
+                "${{ secrets.FILESTER_API_KEY }}"
+              )
+            ) {
+              Write-Host "::error::Falta FILESTER_API_KEY"
+              $missing = $true
+            }
+
           }
-          if ($missing) { exit 1 }
-          Write-Host "Secrets OK."
+
+          if ($server -eq "vikingfile") {
+            Write-Host "Servidor seleccionado: VikingFile"
+          }
+
+          if ($server -eq "filester") {
+            Write-Host "Servidor seleccionado: Filester"
+          }
+
+          if ($missing) {
+            exit 1
+          }
+
+          Write-Host "Configuración válida."
+
+
+      # ======================================================
+      # FFMPEG
+      # ======================================================
 
       - name: Instalar FFmpeg
+        shell: powershell
         run: |
+
           choco install ffmpeg -y
-          ffmpeg -version | Select-Object -First 1
+
+          ffmpeg -version |
+            Select-Object -First 1
+
+
+      # ======================================================
+      # PYTHON
+      # ======================================================
 
       - name: Configurar Python
         uses: actions/setup-python@v5
+
         with:
           python-version: "3.10"
 
+
+      # ======================================================
+      # DEPENDENCIAS
+      # ======================================================
+
       - name: Instalar dependencias Python
-        # El script simplificado solo necesita requests (ya no necesita requirements.txt complejo)
+        shell: powershell
         run: |
+
           python -m pip install --upgrade pip
+
           pip install requests
 
+
+      # ======================================================
+      # EJECUTAR GRABADOR
+      # ======================================================
+
       - name: Ejecutar grabador
+
         env:
+
           STREAM_PAGE_URL: ${{ secrets.STREAM_PAGE_URL }}
+
           FILESTER_API_KEY: ${{ secrets.FILESTER_API_KEY }}
+
           FILESTER_FOLDER_ID: ${{ secrets.FILESTER_FOLDER_ID }}
+
+          VIKINGFILE_USER: ${{ secrets.VIKINGFILE_USER }}
+
+          VIKINGFILE_PATH: ${{ secrets.VIKINGFILE_PATH }}
+
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
           CUSTOM_FILE_NAME: ${{ github.event.inputs.file_name }}
+
           RECORDING_DURATION: ${{ github.event.inputs.recording_duration }}
+
+          UPLOAD_SERVER: ${{ github.event.inputs.upload_server }}
+
+        shell: powershell
+
         run: |
+
           python -u recorder.py
