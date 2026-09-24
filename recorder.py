@@ -2,6 +2,8 @@ import os
 import re
 import sys
 import time
+import json
+import base64
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -61,7 +63,6 @@ def sanitize_filename(name):
     name = name.strip().strip(".")
     return name
 
-
 def create_filename():
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
@@ -69,7 +70,6 @@ def create_filename():
         clean_name = sanitize_filename(CUSTOM_FILE_NAME)
         if clean_name:
             # Se agrega el timestamp también para evitar sobreescribir archivos
-            # si se dispara dos veces el mismo día con el mismo nombre.
             return f"{clean_name}_{timestamp}.mp4"
 
     return f"grabacion_{timestamp}.mp4"
@@ -83,7 +83,6 @@ def javascript_unescape(value):
     value = value.replace("\\u0026", "&")
     value = value.replace("\\x26", "&")
     return value
-
 
 def get_m3u8_url():
     print("\n" + "=" * 70 + "\n0. OBTENIENDO ENLACE M3U8\n" + "=" * 70)
@@ -105,23 +104,81 @@ def get_m3u8_url():
     response.raise_for_status()
     html = response.text
 
-    patterns = [
-        r'playbackURL\s*=\s*"([^"]+)"',
-        r"playbackURL\s*=\s*'([^']+)'",
-        r'"playbackURL"\s*:\s*"([^"]+)"',
-        r"'playbackURL'\s*:\s*'([^']+)'",
-        r'https?:\\?/\\?/[^"\']+?\.m3u8[^"\']*',
-    ]
-
     m3u8_url = None
-    for pattern in patterns:
-        match = re.search(pattern, html, re.IGNORECASE)
-        if match:
-            m3u8_url = match.group(1) if len(match.groups()) > 0 else match.group(0)
-            break
+
+    # --------------------------------------------------------
+    # 1. INTENTO DE DESOFUSCACIÓN (Base64 + Resta matemática)
+    # --------------------------------------------------------
+    try:
+        # Buscamos el bloque del array ofuscado evitando corchetes literales en el regex
+        # Se usa \x5B para [ y \x5D para ] y así no se rompe la interfaz web.
+        array_match = re.search(r'([a-zA-Z0-9_]+)\s*=\s*(\x5B\x5B\d+,\s*"[A-Za-z0-9+/=]+"\x5D[^;]+\x5D);', html)
+        
+        if array_match:
+            array_name = array_match.group(1)
+            array_data = json.loads(array_match.group(2))
+            
+            # Ordenar por el primer elemento (índice)
+            array_data.sort(key=lambda x: x[0])
+            
+            # Buscar la definición de la llave (ej: var k=fXlED()+ugXDW();) 
+            # Aseguramos que sea la llave correspondiente a nuestro array
+            k_pattern = re.escape(array_name) + r'\.sort[^\;]+\;\s*var\s+[a-zA-Z0-9_]+\s*=\s*([a-zA-Z0-9_]+)\(\)\s*\+\s*([a-zA-Z0-9_]+)\(\)\s*;'
+            k_match = re.search(k_pattern, html)
+            
+            if k_match:
+                func1_name = k_match.group(1)
+                func2_name = k_match.group(2)
+                
+                # Extraer los números que retornan ambas funciones
+                func1_match = re.search(r'function\s+' + re.escape(func1_name) + r'\(\)\s*\{\s*return\s+(\d+)\s*;\s*\}', html)
+                func2_match = re.search(r'function\s+' + re.escape(func2_name) + r'\(\)\s*\{\s*return\s+(\d+)\s*;\s*\}', html)
+                
+                if func1_match and func2_match:
+                    # Sumamos los valores para obtener la llave 'k'
+                    k_val = int(func1_match.group(1)) + int(func2_match.group(2))
+                    
+                    decoded_url = ""
+                    for item in array_data:
+                        encoded_val = item[1]
+                        
+                        # Decodificar Base64
+                        decoded_bytes = base64.b64decode(encoded_val)
+                        decoded_str = decoded_bytes.decode('utf-8', errors='ignore')
+                        
+                        # Extraer solo los dígitos (/\D/g en JS)
+                        digits_only = re.sub(r'\D', '', decoded_str)
+                        if digits_only:
+                            # Restar la llave y convertir de código a carácter
+                            char_code = int(digits_only) - k_val
+                            decoded_url += chr(char_code)
+                            
+                    if ".m3u8" in decoded_url:
+                        m3u8_url = decoded_url
+                        print("¡URL desofuscada con éxito usando el nuevo método matemático!")
+    except Exception as e:
+        print(f"Advertencia: Falló el intento de desofuscación: {e}")
+
+    # --------------------------------------------------------
+    # 2. FALLBACK A LOS PATRONES ANTIGUOS DIRECTOS
+    # --------------------------------------------------------
+    if not m3u8_url:
+        patterns = [
+            r'playbackURL\s*=\s*"([^"]+)"',
+            r"playbackURL\s*=\s*'([^']+)'",
+            r'"playbackURL"\s*:\s*"([^"]+)"',
+            r"'playbackURL'\s*:\s*'([^']+)'",
+            r'https?:\\?/\\?/[^"\']+?\.m3u8[^"\']*',
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, html, re.IGNORECASE)
+            if match:
+                m3u8_url = match.group(1) if len(match.groups()) > 0 else match.group(0)
+                break
 
     if not m3u8_url:
-        raise RuntimeError("No se encontró playbackURL ni una URL .m3u8 en el HTML.")
+        raise RuntimeError("No se encontró la URL .m3u8 en el HTML (Ni ofuscada ni en texto plano).")
 
     m3u8_url = javascript_unescape(m3u8_url).strip()
     print(f"M3U8 Extraído: {m3u8_url}")
@@ -129,7 +186,7 @@ def get_m3u8_url():
 
 
 # ============================================================
-# GRABAR STREAM HLS (con monitoreo periódico)
+# GRABAR STREAM HLS
 # ============================================================
 def record_stream(m3u8_url, output_file):
     print("\n" + "=" * 70 + "\n1. INICIANDO GRABACIÓN HLS\n" + "=" * 70)
@@ -164,7 +221,7 @@ def record_stream(m3u8_url, output_file):
         raise RuntimeError("FFmpeg no está instalado.")
 
     send_telegram(
-        f"🎬 <b>Grabación iniciada</b>\n"
+        f"🎬 **Grabación iniciada**\n"
         f"Archivo: {output_file}\n"
         f"Duración objetivo: {RECORDING_DURATION // 60} min"
     )
@@ -200,7 +257,7 @@ def record_stream(m3u8_url, output_file):
             size_status = "✅ creciendo" if growing else "⚠️ NO está creciendo"
 
             send_telegram(
-                f"🎥 <b>Grabación en curso</b> ({elapsed_min} min)\n"
+                f"🎥 **Grabación en curso** ({elapsed_min} min)\n"
                 f"Proceso: {process_status}\n"
                 f"Tamaño: {size_mb:.1f} MB — {size_status}"
             )
@@ -322,10 +379,10 @@ def main():
         delete_file(video_file)
 
         if url:
-            send_telegram(f"✅ <b>Proceso completado</b>\n\nEnlace: {url}")
+            send_telegram(f"✅ **Proceso completado**\n\nEnlace: {url}")
         else:
             send_telegram(
-                "✅ <b>Proceso completado</b>\n\n"
+                "✅ **Proceso completado**\n\n"
                 "Subida correcta, pero Filester no devolvió un enlace en la respuesta. "
                 "Revisa el panel de Filester."
             )
@@ -334,10 +391,9 @@ def main():
 
     except Exception as error:
         print(f"\nERROR FATAL: {error}")
-        send_telegram(f"❌ <b>Error en la grabación</b>\n\n{error}")
+        send_telegram(f"❌ **Error en la grabación**\n\n{error}")
         sys.exit(1)
 
 
 if __name__ == "__main__":
     main()
-                          
