@@ -73,4 +73,4 @@ jobs:
           CUSTOM_FILE_NAME: ${{ github.event.inputs.file_name }}
           RECORDING_DURATION: ${{ github.event.inputs.recording_duration }}
         run: |
-          python recorder.py
+          python -u recorder.py
