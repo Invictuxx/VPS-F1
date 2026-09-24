@@ -50,7 +50,6 @@ def send_telegram(message):
             timeout=15,
         )
     except requests.RequestException as error:
-        # Si Telegram falla, no debe tumbar el proceso principal
         print(f"AVISO: no se pudo enviar mensaje a Telegram: {error}")
 
 
@@ -58,20 +57,16 @@ def send_telegram(message):
 # CREAR NOMBRE DE ARCHIVO
 # ============================================================
 def sanitize_filename(name):
-    # Quita caracteres inválidos para nombres de archivo en Windows/Linux
     name = re.sub(r'[<>:"/\\|?*]', "", name)
     name = name.strip().strip(".")
     return name
 
 def create_filename():
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-
     if CUSTOM_FILE_NAME:
         clean_name = sanitize_filename(CUSTOM_FILE_NAME)
         if clean_name:
-            # Se agrega el timestamp también para evitar sobreescribir archivos
             return f"{clean_name}_{timestamp}.mp4"
-
     return f"grabacion_{timestamp}.mp4"
 
 
@@ -110,19 +105,15 @@ def get_m3u8_url():
     # 1. INTENTO DE DESOFUSCACIÓN (Base64 + Resta matemática)
     # --------------------------------------------------------
     try:
-        # Buscamos el bloque del array ofuscado evitando corchetes literales en el regex
-        # Se usa \x5B para [ y \x5D para ] y así no se rompe la interfaz web.
+        # Extraemos el array, asegurando compatibilidad con los corchetes
         array_match = re.search(r'([a-zA-Z0-9_]+)\s*=\s*(\x5B\x5B\d+,\s*"[A-Za-z0-9+/=]+"\x5D[^;]+\x5D);', html)
         
         if array_match:
             array_name = array_match.group(1)
             array_data = json.loads(array_match.group(2))
             
-            # Ordenar por el primer elemento (índice)
             array_data.sort(key=lambda x: x[0])
             
-            # Buscar la definición de la llave (ej: var k=fXlED()+ugXDW();) 
-            # Aseguramos que sea la llave correspondiente a nuestro array
             k_pattern = re.escape(array_name) + r'\.sort[^\;]+\;\s*var\s+[a-zA-Z0-9_]+\s*=\s*([a-zA-Z0-9_]+)\(\)\s*\+\s*([a-zA-Z0-9_]+)\(\)\s*;'
             k_match = re.search(k_pattern, html)
             
@@ -130,32 +121,29 @@ def get_m3u8_url():
                 func1_name = k_match.group(1)
                 func2_name = k_match.group(2)
                 
-                # Extraer los números que retornan ambas funciones
+                # Se busca el número de retorno de cada función
                 func1_match = re.search(r'function\s+' + re.escape(func1_name) + r'\(\)\s*\{\s*return\s+(\d+)\s*;\s*\}', html)
                 func2_match = re.search(r'function\s+' + re.escape(func2_name) + r'\(\)\s*\{\s*return\s+(\d+)\s*;\s*\}', html)
                 
                 if func1_match and func2_match:
-                    # Sumamos los valores para obtener la llave 'k'
-                    k_val = int(func1_match.group(1)) + int(func2_match.group(2))
+                    # CORREGIDO: Ambos son el group(1) de sus respectivas búsquedas
+                    k_val = int(func1_match.group(1)) + int(func2_match.group(1))
                     
                     decoded_url = ""
                     for item in array_data:
                         encoded_val = item[1]
                         
-                        # Decodificar Base64
                         decoded_bytes = base64.b64decode(encoded_val)
                         decoded_str = decoded_bytes.decode('utf-8', errors='ignore')
                         
-                        # Extraer solo los dígitos (/\D/g en JS)
                         digits_only = re.sub(r'\D', '', decoded_str)
                         if digits_only:
-                            # Restar la llave y convertir de código a carácter
                             char_code = int(digits_only) - k_val
                             decoded_url += chr(char_code)
                             
                     if ".m3u8" in decoded_url:
                         m3u8_url = decoded_url
-                        print("¡URL desofuscada con éxito usando el nuevo método matemático!")
+                        print("¡URL desofuscada con éxito mediante ingeniería inversa!")
     except Exception as e:
         print(f"Advertencia: Falló el intento de desofuscación: {e}")
 
@@ -240,13 +228,11 @@ def record_stream(m3u8_url, output_file):
         now = time.time()
         elapsed = now - start_time
 
-        # Si ffmpeg no cerró solo tras duración + margen, lo matamos
         if elapsed > max_seconds:
             process.kill()
             killed_for_timeout = True
             break
 
-        # Aviso periódico de estado
         if now - last_check >= CHECK_INTERVAL_SECONDS:
             current_size = Path(output_file).stat().st_size if Path(output_file).exists() else 0
             growing = current_size > last_size
