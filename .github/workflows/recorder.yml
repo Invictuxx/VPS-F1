@@ -3,21 +3,10 @@ name: Grabar stream y subir archivo
 on:
   workflow_dispatch:
     inputs:
-
-      upload_server:
-        description: "Servidor donde subir el archivo"
-        required: true
-        type: choice
-        options:
-          - filester
-          - vikingfile
-        default: filester
-
       recording_duration:
         description: "Duración en segundos (10800 = 3 horas)"
         required: false
         default: "10800"
-
       file_name:
         description: "Nombre del archivo sin extensión"
         required: false
@@ -31,66 +20,29 @@ permissions:
   contents: read
 
 jobs:
-
   record:
-
     runs-on: windows-latest
-
     timeout-minutes: 360
-
     env:
       PYTHONIOENCODING: "utf-8"
 
     steps:
-
-      # ======================================================
-      # CHECKOUT
-      # ======================================================
-
       - name: Checkout del repositorio
         uses: actions/checkout@v4
-
-
-      # ======================================================
-      # VALIDAR CONFIGURACIÓN
-      # ======================================================
 
       - name: Validar configuración
         shell: powershell
         run: |
-
           $missing = $false
 
-          if (
-            [string]::IsNullOrWhiteSpace(
-              "${{ secrets.STREAM_PAGE_URL }}"
-            )
-          ) {
+          if ([string]::IsNullOrWhiteSpace("${{ secrets.STREAM_PAGE_URL }}")) {
             Write-Host "::error::Falta STREAM_PAGE_URL"
             $missing = $true
           }
 
-          $server = "${{ github.event.inputs.upload_server }}"
-
-          if ($server -eq "filester") {
-
-            if (
-              [string]::IsNullOrWhiteSpace(
-                "${{ secrets.FILESTER_API_KEY }}"
-              )
-            ) {
-              Write-Host "::error::Falta FILESTER_API_KEY"
-              $missing = $true
-            }
-
-          }
-
-          if ($server -eq "vikingfile") {
-            Write-Host "Servidor seleccionado: VikingFile"
-          }
-
-          if ($server -eq "filester") {
-            Write-Host "Servidor seleccionado: Filester"
+          if ([string]::IsNullOrWhiteSpace("${{ secrets.FILESTER_API_KEY }}")) {
+            Write-Host "::error::Falta FILESTER_API_KEY"
+            $missing = $true
           }
 
           if ($missing) {
@@ -99,75 +51,32 @@ jobs:
 
           Write-Host "Configuración válida."
 
-
-      # ======================================================
-      # FFMPEG
-      # ======================================================
-
       - name: Instalar FFmpeg
         shell: powershell
         run: |
-
           choco install ffmpeg -y
-
-          ffmpeg -version |
-            Select-Object -First 1
-
-
-      # ======================================================
-      # PYTHON
-      # ======================================================
+          ffmpeg -version | Select-Object -First 1
 
       - name: Configurar Python
         uses: actions/setup-python@v5
-
         with:
           python-version: "3.10"
-
-
-      # ======================================================
-      # DEPENDENCIAS
-      # ======================================================
 
       - name: Instalar dependencias Python
         shell: powershell
         run: |
-
           python -m pip install --upgrade pip
-
           pip install requests
 
-
-      # ======================================================
-      # EJECUTAR GRABADOR
-      # ======================================================
-
       - name: Ejecutar grabador
-
         env:
-
           STREAM_PAGE_URL: ${{ secrets.STREAM_PAGE_URL }}
-
           FILESTER_API_KEY: ${{ secrets.FILESTER_API_KEY }}
-
           FILESTER_FOLDER_ID: ${{ secrets.FILESTER_FOLDER_ID }}
-
-          VIKINGFILE_USER: ${{ secrets.VIKINGFILE_USER }}
-
-          VIKINGFILE_PATH: ${{ secrets.VIKINGFILE_PATH }}
-
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
           CUSTOM_FILE_NAME: ${{ github.event.inputs.file_name }}
-
           RECORDING_DURATION: ${{ github.event.inputs.recording_duration }}
-
-          UPLOAD_SERVER: ${{ github.event.inputs.upload_server }}
-
         shell: powershell
-
         run: |
-
           python -u recorder.py
