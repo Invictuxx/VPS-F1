@@ -4,261 +4,342 @@ import time
 import base64
 import subprocess
 from pathlib import Path
+from urllib.parse import urlparse
 import requests
 
-STREAM_PAGE_URL=os.getenv("STREAM_PAGE_URL","")
-FILESTER_API_KEY=os.getenv("FILESTER_API_KEY","")
-FILESTER_FOLDER_ID=os.getenv("FILESTER_FOLDER_ID","")
-RECORDING_DURATION=int(os.getenv("RECORDING_DURATION","30"))
-UPLOAD_RETRIES=int(os.getenv("UPLOAD_RETRIES","5"))
-RETRY_DELAY=int(os.getenv("RETRY_DELAY","30"))
-CUSTOM_FILE_NAME=os.getenv("CUSTOM_FILE_NAME","")
-TELEGRAM_BOT_TOKEN=os.getenv("TELEGRAM_BOT_TOKEN","")
-TELEGRAM_CHAT_ID=os.getenv("TELEGRAM_CHAT_ID","")
-
-FILESTER_UPLOAD_URL="https://u1.filester.me/api/v1/upload"
+STREAM_PAGE_URL = os.getenv("STREAM_PAGE_URL", "").strip()
+FILESTER_API_KEY = os.getenv("FILESTER_API_KEY", "").strip()
+FILESTER_FOLDER_ID = os.getenv("FILESTER_FOLDER_ID", "").strip()
+RECORDING_DURATION = int(os.getenv("RECORDING_DURATION", "10800"))
+UPLOAD_RETRIES = int(os.getenv("UPLOAD_RETRIES", "3"))
+RETRY_DELAY = int(os.getenv("RETRY_DELAY", "10"))
+CUSTOM_FILE_NAME = os.getenv("CUSTOM_FILE_NAME", "").strip()
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+FILESTER_UPLOAD_URL = "https://u1.filester.me/api/v1/upload"
 
 def send_telegram(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
+    url = (
+        f"https://api.telegram.org/bot"
+        f"{TELEGRAM_BOT_TOKEN}/sendMessage"
+    )
     try:
         requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            data={"chat_id":TELEGRAM_CHAT_ID,"text":message},
+            url,
+            data={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": message
+            },
             timeout=30
         )
     except Exception as error:
-        print(f"Telegram falló: {error}")
+        print(f"Telegram no disponible: {error}")
 
 def sanitize_filename(name):
-    name=re.sub(r'[<>:"/\\|?*]','_',name or "")
-    return re.sub(r'\s+',' ',name).strip()
+    name = re.sub(r'[<>:"/\\|?*]', "_", name)
+    name = re.sub(r"\s+", "_", name)
+    return name.strip(" ._") or "grabacion"
 
 def create_filename():
-    name=sanitize_filename(CUSTOM_FILE_NAME)
-    if not name:
-        name=f"grabacion_{time.strftime('%Y%m%d_%H%M%S')}"
-    return f"{name}.mp4"
+    if CUSTOM_FILE_NAME:
+        name = sanitize_filename(CUSTOM_FILE_NAME)
+    else:
+        name = time.strftime("grabacion_%Y%m%d_%H%M%S")
+
+    if not name.lower().endswith(".mp4"):
+        name += ".mp4"
+
+    return name
 
 def javascript_unescape(value):
-    try:
-        return bytes(value,"utf-8").decode("unicode_escape")
-    except Exception:
-        return value
+    value = value.replace(r"\/", "/")
+    value = value.replace(r"\.", ".")
+    value = value.replace(r"\?", "?")
+    value = value.replace(r"\=", "=")
+    value = value.replace(r"\&", "&")
+    value = value.replace(r"\:", ":")
+    value = value.replace(r"\_", "_")
+    return value
+
+
+def is_valid_m3u8_url(url):
+    if not url:
+        return False
+    url = javascript_unescape(url).strip()
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return False
+    if not parsed.netloc:
+        return False
+    return parsed.path.lower().endswith(".m3u8")
+
+def normalize_m3u8_url(url):
+    url = javascript_unescape(url)
+    url = url.replace("\\", "")
+    url = url.strip(" \"'`;,)")
+    return url
+
+
+def extract_m3u8_by_pattern(html):
+    print("\nBuscando URL M3U8 mediante pattern...")
+    patterns = [
+        r'https?://[^"\'<>\s\\]+\.m3u8(?:\?[^"\'<>\s\\]*)?',
+        r'https?:\\?/\\?/[^"\'<>\s]+?\.m3u8(?:\?[^"\'<>\s]*)?',
+        r'["\']([^"\']+\.m3u8(?:\?[^"\']*)?)["\']',
+        r'source(?:Url|URL|url)?\s*[:=]\s*["\']([^"\']+\.m3u8[^"\']*)',
+        r'source\s*:\s*["\']([^"\']+\.m3u8[^"\']*)'
+    ]
+    for pattern in patterns:
+        matches = re.findall(pattern, html, re.I)
+        for match in matches:
+            if isinstance(match, tuple):
+                match = next(
+                    (item for item in match if item), "")
+            url = normalize_m3u8_url(match)
+            if is_valid_m3u8_url(url):
+                print(f"M3U8 encontrada por pattern:\n{url}")
+                return url
+    return None
+
+def decode_sw_array(html):
+    print("\nBuscando ofuscación mediante arreglo Sw...")
+    match = re.search(
+        r'var\s+Sw\s*=\s*\[(.*?)\]\s*;\s*Sw\\?\.sort',
+        html,
+        re.S)
+    if not match:
+        return None
+    pairs = re.findall(
+        r'\[(\d+)\s*,\s*["\']([^"\']+)["\']\]',
+        match.group(1))
+    if not pairs:
+        print("Se encontró Sw, pero no contiene elementos válidos.")
+        return None
+    key = 67043 + 828580
+    decoded_parts = {}
+    for index, value in pairs:
+        try:
+            raw = base64.b64decode(value).decode("utf-8")
+            number_text = re.sub(r"\D", "", raw)
+            if not number_text:
+                continue
+            number = int(number_text)
+            character_code = number - key
+            if character_code < 0 or character_code > 0x10FFFF:
+                continue
+            decoded_parts[int(index)] = chr(character_code)
+        except Exception as error:
+            print(
+                f"No se pudo decodificar índice "
+                f"{index}: {error}")
+    if not decoded_parts:
+        print("No se pudo resolver el arreglo Sw.")
+        return None
+    playback_url = "".join(
+        decoded_parts[index]
+        for index in sorted(decoded_parts))
+    playback_url = normalize_m3u8_url(playback_url)
+    if not is_valid_m3u8_url(playback_url):
+        print("Sw fue procesado, pero no produjo una M3U8 válida.")
+        return None
+    print(f"M3U8 encontrada mediante ofuscación:\n{playback_url}")
+    return playback_url
 
 def get_m3u8_url():
-    print("\n"+"="*70+"\n1. OBTENIENDO URL M3U8\n"+"="*70)
+    print("\n" + "=" * 70)
+    print("1. OBTENIENDO URL M3U8")
+    print("=" * 70)
+    if not STREAM_PAGE_URL:
+        raise RuntimeError("Falta STREAM_PAGE_URL.")
+    response = requests.get(
+        STREAM_PAGE_URL,
+        timeout=60,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 "
+                "(Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 "
+                "(KHTML, like Gecko) "
+                "Chrome/131.0 Safari/537.36"
+            ),
+            "Accept": (
+                "text/html,application/xhtml+xml,"
+                "application/xml;q=0.9,*/*;q=0.8"
+            )
+        }
+    )
 
-    response=requests.get(STREAM_PAGE_URL,timeout=60)
     response.raise_for_status()
-    html=javascript_unescape(response.text)
+    html = response.text
+    print(f"Página descargada: {len(html):,} bytes")
+    # ---------------------------------------------------------------
+    # MÉTODO 1: OFUSCACIÓN ESPECÍFICA DE LA PÁGINA
+    # ---------------------------------------------------------------
+    m3u8_url = decode_sw_array(html)
+    if m3u8_url:
+        return m3u8_url
+    print("No se detectó una ofuscación Sw válida.")
+    # ---------------------------------------------------------------
+    # MÉTODO 2: BÚSQUEDA GENERAL POR PATTERN M3U8
+    # ---------------------------------------------------------------
+    m3u8_url = extract_m3u8_by_pattern(html)
+    if m3u8_url:
+        return m3u8_url
+    # ---------------------------------------------------------------
+    # MÉTODO 3: BUSCAR M3U8 DESPUÉS DE DESESCAPAR JAVASCRIPT
+    # ---------------------------------------------------------------
+    print("Probando nuevamente después de desescapar JavaScript...")
+    decoded_html = javascript_unescape(html)
+    m3u8_url = extract_m3u8_by_pattern(decoded_html)
+    if m3u8_url:
+        return m3u8_url
+    raise RuntimeError("No se encontró ninguna URL M3U8 en la página.")
 
-    patterns=[
-        r'https?[^"\']+\.m3u8[^"\']*',
-        r'https?:\\/\\/[^"\']+\.m3u8[^"\']*',
-        r'"file"\s*:\s*"([^"]+)"',
-        r'"url"\s*:\s*"([^"]+\.m3u8[^"]*)"'
-    ]
-
-    for pattern in patterns:
-        match=re.search(pattern,html,re.I)
-        if match:
-            url=match.group(1) if match.lastindex else match.group(0)
-            url=url.replace("\\/","/")
-            print(f"M3U8 encontrada: {url}")
-            return url
-
-    encoded=re.findall(r'([A-Za-z0-9+/]{40,}={0,2})',html)
-
-    for value in encoded:
-        try:
-            decoded=base64.b64decode(value).decode("utf-8")
-            numbers=re.findall(r'\d+',decoded)
-
-            if numbers:
-                result=""
-                for number in numbers:
-                    try:
-                        result+=chr(int(number)-3)
-                    except Exception:
-                        pass
-
-                match=re.search(r'https?[^"\']+\.m3u8[^"\']*',result)
-
-                if match:
-                    url=match.group(0)
-                    print(f"M3U8 encontrada: {url}")
-                    return url
-        except Exception:
-            continue
-
-    raise RuntimeError("No se encontró ninguna URL M3U8.")
-
-def record_stream(m3u8_url,output_file):
-    print("\n"+"="*70+"\n2. GRABANDO STREAM\n"+"="*70)
-    print(f"Duración: {RECORDING_DURATION} segundos")
+def record_stream(m3u8_url, output_file):
+    print("\n" + "=" * 70)
+    print("2. GRABANDO STREAM")
+    print("=" * 70)
     print(f"Archivo: {output_file}")
-
-    command=[
+    print(f"Duración: {RECORDING_DURATION} segundos")
+    command = [
         "ffmpeg",
-        "-hide_banner",
         "-y",
-        "-fflags","+genpts",
-        "-reconnect","1",
-        "-reconnect_streamed","1",
-        "-reconnect_delay_max","10",
-        "-i",m3u8_url,
-        "-t",str(RECORDING_DURATION),
-        "-c:v","copy",
-        "-c:a","copy",
-        "-bsf:a","aac_adtstoasc",
-        "-movflags","+faststart",
+        "-hide_banner",
+        "-loglevel",
+        "info",
+        "-i",
+        m3u8_url,
+        "-t",
+        str(RECORDING_DURATION),
+        "-c",
+        "copy",
+        "-bsf:a",
+        "aac_adtstoasc",
         output_file
     ]
+    print("Ejecutando FFmpeg...")
+    result = subprocess.run(
+        command,
+        stdout=None,
+        stderr=None)
 
-    result=subprocess.run(command)
-    if result.returncode!=0:
-        raise RuntimeError("FFmpeg terminó con error.")
+    if result.returncode != 0:
+        raise RuntimeError(f"FFmpeg terminó con código {result.returncode}.")
+    print("Grabación finalizada.")
 
-def validate_file(filename):
-    path=Path(filename)
-
+def validate_file(file_path):
+    path = Path(file_path)
     if not path.exists():
-        raise RuntimeError("El archivo no existe.")
+        raise RuntimeError("El archivo grabado no existe.")
+    size = path.stat().st_size
+    if size < 1024:
+        raise RuntimeError("El archivo grabado está vacío o es demasiado pequeño.")
+    print(f"Archivo válido: {size / 1024 / 1024:.2f} MB")
+    return True
 
-    size=path.stat().st_size
-
-    if size<1024:
-        raise RuntimeError("El archivo es demasiado pequeño.")
-
-    print(f"Archivo válido: {size/1024/1024:.2f} MB")
-
-def upload_to_filester(filename):
-    print("\n"+"="*70+"\n3. SUBIENDO A FILESTER\n"+"="*70)
-
+def upload_to_filester(file_path):
+    print("\n" + "=" * 70)
+    print("3. SUBIENDO A FILESTER")
+    print("=" * 70)
     if not FILESTER_API_KEY:
         raise RuntimeError("Falta FILESTER_API_KEY.")
-
-    last_error=None
-
-    for attempt in range(1,UPLOAD_RETRIES+1):
-        print(f"\nIntento {attempt}/{UPLOAD_RETRIES}")
-
+    headers = {
+        "Authorization": f"Bearer {FILESTER_API_KEY}"
+    }
+    data = {}
+    if FILESTER_FOLDER_ID:
+        data["folder_id"] = FILESTER_FOLDER_ID
+    last_error = None
+    for attempt in range(1, UPLOAD_RETRIES + 1):
+        print(f"Intento de subida {attempt}/{UPLOAD_RETRIES}...")
         try:
-            headers={
-                "Authorization":f"Bearer {FILESTER_API_KEY}"
-            }
-
-            data={}
-
-            if FILESTER_FOLDER_ID:
-                data["folder_id"]=FILESTER_FOLDER_ID
-
-            with open(filename,"rb") as file:
-                files={
-                    "file":(
-                        os.path.basename(filename),
-                        file,
-                        "video/mp4"
-                    )
-                }
-
-                response=requests.post(
+            with open(file_path, "rb") as file_handle:
+                response = requests.post(
                     FILESTER_UPLOAD_URL,
                     headers=headers,
                     data=data,
-                    files=files,
+                    files={
+                        "file": (
+                            Path(file_path).name,
+                            file_handle,
+                            "video/mp4"
+                        )
+                    },
                     timeout=3600
                 )
-
-            print(f"HTTP: {response.status_code}")
+            print(f"Respuesta Filester: HTTP {response.status_code}")
             response.raise_for_status()
-
-            result=response.json()
-            print(f"Respuesta Filester: {result}")
-
-            url=(
+            try:
+                result = response.json()
+            except ValueError:
+                result = {}
+            file_url = (
                 result.get("url")
                 or result.get("download_url")
                 or result.get("file_url")
                 or result.get("link")
             )
-
-            if not url:
-                raise RuntimeError(
-                    f"Filester no devolvió una URL: {result}"
-                )
-
-            print("\nUPLOAD CORRECTO")
-            print(f"URL: {url}")
-
-            return True,url
-
+            if file_url:
+                print(f"Archivo subido:\n{file_url}")
+                return file_url
+            print("Filester respondió correctamente, pero no devolvió una URL.")
+            print(response.text[:1000])
+            return None
         except Exception as error:
-            last_error=str(error)
-            print(f"La subida falló:\n{error}")
+            last_error = error
+            print(f"Error de subida: {error}")
+            if attempt < UPLOAD_RETRIES:
+                print(f"Esperando {RETRY_DELAY} segundos...")
+                time.sleep(RETRY_DELAY)
+    raise RuntimeError(f"No se pudo subir el archivo: {last_error}")
 
-        if attempt<UPLOAD_RETRIES:
-            time.sleep(RETRY_DELAY)
-
-    raise RuntimeError(
-        f"Filester falló tras {UPLOAD_RETRIES} intentos. "
-        f"Último error: {last_error}"
-    )
-
-def delete_file(filename):
+def delete_file(file_path):
     try:
-        if os.path.exists(filename):
-            os.remove(filename)
-            print(f"Archivo eliminado: {filename}")
+        path = Path(file_path)
+        if path.exists():
+            path.unlink()
+            print(f"Archivo local eliminado: {path}")
     except Exception as error:
-        print(f"No se pudo eliminar el archivo: {error}")
+        print(f"No se pudo eliminar el archivo local: {error}")
 
 def main():
-    filename=create_filename()
-
+    print("=" * 70)
+    print("RECORDER")
+    print("=" * 70)
+    output_file = create_filename()
     try:
-        if not STREAM_PAGE_URL:
-            raise RuntimeError("Falta STREAM_PAGE_URL.")
-
-        if not FILESTER_API_KEY:
-            raise RuntimeError("Falta FILESTER_API_KEY.")
-
-        send_telegram(
-            f"Grabación iniciada.\nArchivo: {filename}\n"
-            f"Duración: {RECORDING_DURATION} segundos."
+        m3u8_url = get_m3u8_url()
+        print("\nURL M3U8 lista para FFmpeg.")
+        record_stream(
+            m3u8_url,
+            output_file
         )
-
-        m3u8_url=get_m3u8_url()
-        record_stream(m3u8_url,filename)
-        validate_file(filename)
-
-        _,url=upload_to_filester(filename)
-
-        send_telegram(
-            f"Grabación completada.\n"
-            f"Archivo: {filename}\n"
-            f"Filester:\n{url}"
+        validate_file(output_file)
+        file_url = upload_to_filester(
+            output_file
         )
-
-        print("\n"+"="*70)
-        print("PROCESO COMPLETADO")
-        print("="*70)
-
+        if file_url:
+            send_telegram(
+                "Grabación completada.\n\n"
+                f"Archivo: {output_file}\n"
+                f"URL: {file_url}"
+            )
+        else:
+            send_telegram(
+                "Grabación completada.\n\n"
+                f"Archivo: {output_file}\n"
+                "Filester no devolvió URL."
+            )
+        delete_file(output_file)
+        print("\nProceso completado.")
     except Exception as error:
-        print("\n"+"="*70)
-        print("ERROR")
-        print("="*70)
-        print(error)
-
+        print(f"\nERROR:{error}")
         send_telegram(
-            f"Error en la grabación:\n{error}"
+            "Error en recorder.py:\n\n"
+            f"{error}"
         )
-
         raise
-
-    finally:
-        delete_file(filename)
-
-if __name__=="__main__":
+if __name__ == "__main__":
     main()
