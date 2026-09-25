@@ -30,9 +30,8 @@ CHECK_INTERVAL_SECONDS = 3600  # Aviso de estado cada 1 hora
 POLL_INTERVAL_SECONDS = 30     # Cada cuánto se revisa si ffmpeg sigue vivo
 SAFETY_MARGIN_SECONDS = 300    # Margen extra antes de matar ffmpeg por si tarda en cerrar
 
-
 # ============================================================
-# TELEGRAM - TEXTO Y VIDEO
+# TELEGRAM - SOLO TEXTO
 # ============================================================
 def send_telegram(message):
     if not TELEGRAM_ENABLED:
@@ -51,41 +50,6 @@ def send_telegram(message):
         )
     except requests.RequestException as error:
         print(f"AVISO: no se pudo enviar mensaje a Telegram: {error}")
-
-def send_telegram_video(filename, caption=""):
-    if not TELEGRAM_ENABLED:
-        return False
-    
-    print("\n" + "=" * 70 + "\n3. ENVIANDO VIDEO A TELEGRAM\n" + "=" * 70)
-    
-    file_size_mb = Path(filename).stat().st_size / (1024 * 1024)
-    if file_size_mb > 49.5:
-        msg = f"⚠️ **Aviso:** El video pesa {file_size_mb:.2f} MB. Telegram no permite a los bots enviar archivos mayores a 50 MB. Se omitirá el envío directo."
-        print(msg)
-        send_telegram(msg)
-        return False
-
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
-        with open(filename, 'rb') as video_file:
-            print("Subiendo archivo a Telegram (esto puede tardar dependiendo de la velocidad)...")
-            response = requests.post(
-                url,
-                data={
-                    "chat_id": TELEGRAM_CHAT_ID,
-                    "caption": caption,
-                    "parse_mode": "HTML"
-                },
-                files={"video": video_file},
-                timeout=300
-            )
-            response.raise_for_status()
-            print("¡Video enviado a Telegram con éxito!")
-            return True
-    except Exception as error:
-        print(f"Error al enviar video por Telegram: {error}")
-        send_telegram(f"❌ **Error al enviar el video por Telegram:**\n{error}")
-        return False
 
 
 # ============================================================
@@ -267,7 +231,8 @@ def record_stream(m3u8_url, output_file):
 
             process_status = "✅ corriendo" if process.poll() is None else "❌ detenido"
             size_status = "✅ creciendo" if growing else "⚠️ NO está creciendo"
-
+            
+            print(f"[{elapsed_min} min] Proceso {process_status} | Tamaño: {size_mb:.1f} MB ({size_status})")
             send_telegram(
                 f"🎥 **Grabación en curso** ({elapsed_min} min)\n"
                 f"Proceso: {process_status}\n"
@@ -386,27 +351,19 @@ def main():
         record_stream(m3u8_url, video_file)
         validate_file(video_file)
         
-        # Intentamos subir a Filester, pero si falla NO cerramos el script
-        filester_url = None
-        try:
-            filester_url = upload_to_filester(video_file)
-        except Exception as filester_error:
-            print(f"\n⚠️ Omitiendo Filester por error: {filester_error}")
-            send_telegram("⚠️ **Aviso:** Falló la subida a Filester, pero la grabación fue exitosa. Se intentará enviar directo por Telegram.")
+        filester_url = upload_to_filester(video_file)
 
-        # Armamos el texto para acompañar el video en Telegram
-        caption = "✅ **Proceso completado**\n"
-        if filester_url:
-            caption += f"\nEnlace Filester: {filester_url}"
-        else:
-            caption += "\nSubida a Filester: Fallida"
-
-        # Enviamos el video directamente
-        send_telegram_video(video_file, caption=caption)
-
-        print("\n" + "=" * 70 + "\n4. LIMPIANDO ARCHIVOS\n" + "=" * 70)
+        print("\n" + "=" * 70 + "\n3. LIMPIANDO ARCHIVOS\n" + "=" * 70)
         delete_file(video_file)
-        print("\n" + "=" * 70 + "\nPROCESO COMPLETADO\n" + "=" * 70 + "\n")
+        
+        if filester_url:
+            send_telegram(f"✅ **Proceso completado**\n\nEnlace Filester: {filester_url}")
+        else:
+            send_telegram("✅ **Proceso completado**\n\nSubida correcta, pero Filester no devolvió un enlace.")
+            
+        print("\n" + "=" * 70 + "\nPROCESO COMPLETADO\n" + "=" * 70)
+        if filester_url:
+            print(f"Enlace Filester: {filester_url}\n")
 
     except Exception as error:
         print(f"\nERROR FATAL: {error}")
